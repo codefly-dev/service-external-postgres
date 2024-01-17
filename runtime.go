@@ -9,6 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/codefly-dev/core/agents/helpers/code"
+
+	"github.com/codefly-dev/core/agents/services"
+	"github.com/codefly-dev/core/wool"
+
 	"github.com/codefly-dev/core/agents/network"
 	"github.com/codefly-dev/core/configurations"
 	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
@@ -69,7 +74,7 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 		return s.Base.Runtime.LoadError(err)
 	}
 
-	migrations.WithDir(s.Location)
+	requirements.WithDir(s.Location)
 
 	err = s.LoadEndpoints(ctx)
 	if err != nil {
@@ -78,7 +83,7 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 
 	s.EnvironmentVariables = configurations.NewEnvironmentVariableManager()
 
-	return s.Base.Runtime.LoadResponse(s.Endpoints)
+	return s.Base.Runtime.LoadResponse()
 }
 
 func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtimev0.InitResponse, error) {
@@ -86,7 +91,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	ctx = s.Wool.Inject(ctx)
 
 	var err error
-	s.NetworkMappings, err = s.Network(ctx)
+	s.NetworkMappings, err = s.CustomNetwork(ctx)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
@@ -116,7 +121,10 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.Runner.WithPort(runners.DockerPort{Container: fmt.Sprintf("%d", s.Port), Host: port})
 	s.Runner.WithEnvironmentVariables(s.EnvironmentVariables.GetBase()...)
-	s.Runner.Silence()
+	s.Runner.WithEnvironmentVariables(fmt.Sprintf("POSTGRES_DB=%s", s.DatabaseName))
+	if s.Settings.Silent {
+		s.Runner.Silence()
+	}
 
 	err = s.Runner.Init(ctx, image)
 	if err != nil {
@@ -159,7 +167,6 @@ func (s *Runtime) migrationPath() string {
 func (s *Runtime) applyMigration(ctx context.Context, connection string) error {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
-	s.Wool.Focus("applying migrations")
 
 	db, err := sql.Open("postgres", connection)
 	if err != nil {
@@ -210,6 +217,15 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	if err != nil {
 		return s.Runtime.StartError(err)
 	}
+
+	if s.Settings.Watch {
+		conf := services.NewWatchConfiguration(requirements)
+		err := s.SetupWatcher(ctx, conf, s.EventHandler)
+		if err != nil {
+			s.Wool.Warn("error in watcher", wool.ErrField(err))
+		}
+	}
+
 	return s.Runtime.StartResponse()
 }
 
@@ -242,9 +258,14 @@ func (s *Runtime) Communicate(ctx context.Context, req *agentv0.Engage) (*agentv
 
  */
 
-func (s *Runtime) Network(ctx context.Context) ([]*runtimev0.NetworkMapping, error) {
+func (s *Runtime) EventHandler(event code.Change) error {
+	s.WantRestart()
+	return nil
+}
+
+func (s *Runtime) CustomNetwork(ctx context.Context) ([]*runtimev0.NetworkMapping, error) {
 	endpoint := s.Endpoints[0]
-	pm, err := network.NewServicePortManager(ctx, s.Identity)
+	pm, err := network.NewServicePortManager(ctx)
 	if err != nil {
 		return nil, s.Wool.Wrapf(err, "cannot create network manager")
 	}

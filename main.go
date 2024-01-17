@@ -21,11 +21,13 @@ import (
 // Agent version
 var agent = shared.Must(configurations.LoadFromFs[configurations.Agent](shared.Embed(info)))
 
-var migrations = builders.NewDependency("migrations", "migrations")
+var requirements = builders.NewDependency("migrations", "migrations").WithSelect(shared.NewSelect("*.sql"))
 
 type Settings struct {
 	Debug bool `yaml:"debug"` // Developer only
 
+	Watch        bool   `yaml:"watch"`
+	Silent       bool   `yaml:"silent"`
 	DatabaseName string `yaml:"database-name"`
 	WithoutSSL   bool   `yaml:"without-ssl"`
 }
@@ -71,6 +73,8 @@ func NewService() *Service {
 func (s *Service) LoadEndpoints(ctx context.Context) error {
 	//	visibility := configurations.VisibilityApplication
 	s.endpoint = &configurations.Endpoint{Name: "psql", Visibility: configurations.VisibilityApplication}
+	s.endpoint.Application = s.Configuration.Application
+	s.endpoint.Service = s.Configuration.Name
 	endpoint, err := configurations.NewTCPAPI(ctx, s.endpoint)
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot  create rest endpoint")

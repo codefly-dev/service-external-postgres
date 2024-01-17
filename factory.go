@@ -4,6 +4,9 @@ import (
 	"context"
 	"embed"
 
+	"github.com/codefly-dev/core/agents/communicate"
+	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
+
 	"github.com/codefly-dev/core/agents/services"
 	"github.com/codefly-dev/core/configurations"
 	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
@@ -31,7 +34,7 @@ func (s *Factory) Load(ctx context.Context, req *factoryv0.LoadRequest) (*factor
 		return nil, err
 	}
 
-	migrations.WithDir(s.Location)
+	requirements.WithDir(s.Location)
 
 	err = s.LoadEndpoints(ctx)
 	if err != nil {
@@ -43,21 +46,48 @@ func (s *Factory) Load(ctx context.Context, req *factoryv0.LoadRequest) (*factor
 		return nil, err
 	}
 
-	return s.Factory.LoadResponse(s.Endpoints, gettingStarted)
+	// communication on CreateResponse
+	err = s.Communication.Register(ctx, communicate.New[factoryv0.CreateRequest](s.createCommunicate()))
+	if err != nil {
+		return s.Factory.LoadError(err)
+	}
+
+	return s.Factory.LoadResponse(gettingStarted)
+}
+
+const Watch = "watch"
+const DatabaseName = "database-name"
+
+func (s *Factory) createCommunicate() *communicate.Sequence {
+	return communicate.NewSequence(
+		communicate.NewConfirm(&agentv0.Message{Name: Watch, Message: "Migration hot-reload (Recommended)?", Description: "codefly can restart your database when migration changes detected 🔎"}, true),
+		communicate.NewStringInput(&agentv0.Message{Name: DatabaseName, Message: "Name of the database?", Description: "Ensure encapsulation of your data"}, s.Configuration.Application),
+	)
 }
 
 type create struct {
+	DatabaseName string
+	TableName    string
 }
 
 func (s *Factory) Create(ctx context.Context, req *factoryv0.CreateRequest) (*factoryv0.CreateResponse, error) {
 	defer s.Wool.Catch()
 
-	err := s.LoadEndpoints(ctx)
+	session, err := s.Communication.Done(ctx, communicate.Channel[factoryv0.CreateRequest]())
+	if err != nil {
+		return s.Factory.CreateError(err)
+	}
+
+	s.Settings.DatabaseName, err = session.GetInputString(DatabaseName)
+	if err != nil {
+		return s.Factory.CreateError(err)
+	}
+
 	if err != nil {
 		return nil, s.Wool.Wrapf(err, "cannot create endpoints")
 	}
 
-	err = s.Templates(ctx, create{}, services.WithFactory(factory))
+	err = s.Templates(ctx, create{DatabaseName: s.Settings.DatabaseName, TableName: s.Configuration.Name}, services.WithFactory(factory))
 	if err != nil {
 		return s.Base.Factory.CreateError(err)
 	}
