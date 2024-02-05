@@ -9,24 +9,22 @@ import (
 
 	"github.com/codefly-dev/core/agents/services"
 	"github.com/codefly-dev/core/configurations"
-	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
-	factoryv0 "github.com/codefly-dev/core/generated/go/services/factory/v0"
-	runtimev0 "github.com/codefly-dev/core/generated/go/services/runtime/v0"
+	builderv0 "github.com/codefly-dev/core/generated/go/services/builder/v0"
 	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/templates"
 )
 
-type Factory struct {
+type Builder struct {
 	*Service
 }
 
-func NewFactory() *Factory {
-	return &Factory{
+func NewBuilder() *Builder {
+	return &Builder{
 		Service: NewService(),
 	}
 }
 
-func (s *Factory) Load(ctx context.Context, req *factoryv0.LoadRequest) (*factoryv0.LoadResponse, error) {
+func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builderv0.LoadResponse, error) {
 	defer s.Wool.Catch()
 
 	err := s.Base.Load(ctx, req.Identity, s.Settings)
@@ -34,31 +32,31 @@ func (s *Factory) Load(ctx context.Context, req *factoryv0.LoadRequest) (*factor
 		return nil, err
 	}
 
-	requirements.WithDir(s.Location)
+	requirements.Localize(s.Location)
 
 	err = s.LoadEndpoints(ctx)
 	if err != nil {
-		return s.Factory.LoadError(err)
+		return s.Builder.LoadError(err)
 	}
 
-	gettingStarted, err := templates.ApplyTemplateFrom(shared.Embed(factory), "templates/factory/GETTING_STARTED.md", s.Information)
+	gettingStarted, err := templates.ApplyTemplateFrom(ctx, shared.Embed(factoryFS), "templates/factory/GETTING_STARTED.md", s.Information)
 	if err != nil {
 		return nil, err
 	}
 
 	// communication on CreateResponse
-	err = s.Communication.Register(ctx, communicate.New[factoryv0.CreateRequest](s.createCommunicate()))
+	err = s.Communication.Register(ctx, communicate.New[builderv0.CreateRequest](s.createCommunicate()))
 	if err != nil {
-		return s.Factory.LoadError(err)
+		return s.Builder.LoadError(err)
 	}
 
-	return s.Factory.LoadResponse(gettingStarted)
+	return s.Builder.LoadResponse(gettingStarted)
 }
 
 const Watch = "watch"
 const DatabaseName = "database-name"
 
-func (s *Factory) createCommunicate() *communicate.Sequence {
+func (s *Builder) createCommunicate() *communicate.Sequence {
 	return communicate.NewSequence(
 		communicate.NewConfirm(&agentv0.Message{Name: Watch, Message: "Migration hot-reload (Recommended)?", Description: "codefly can restart your database when migration changes detected 🔎"}, true),
 		communicate.NewStringInput(&agentv0.Message{Name: DatabaseName, Message: "Name of the database?", Description: "Ensure encapsulation of your data"}, s.Configuration.Application),
@@ -70,50 +68,50 @@ type create struct {
 	TableName    string
 }
 
-func (s *Factory) Create(ctx context.Context, req *factoryv0.CreateRequest) (*factoryv0.CreateResponse, error) {
+func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*builderv0.CreateResponse, error) {
 	defer s.Wool.Catch()
 
-	session, err := s.Communication.Done(ctx, communicate.Channel[factoryv0.CreateRequest]())
+	session, err := s.Communication.Done(ctx, communicate.Channel[builderv0.CreateRequest]())
 	if err != nil {
-		return s.Factory.CreateError(err)
+		return s.Builder.CreateError(err)
 	}
 
 	s.Settings.DatabaseName, err = session.GetInputString(DatabaseName)
 	if err != nil {
-		return s.Factory.CreateError(err)
+		return s.Builder.CreateError(err)
 	}
 
 	if err != nil {
 		return nil, s.Wool.Wrapf(err, "cannot create endpoints")
 	}
 
-	err = s.Templates(ctx, create{DatabaseName: s.Settings.DatabaseName, TableName: s.Configuration.Name}, services.WithFactory(factory))
+	err = s.Templates(ctx, create{DatabaseName: s.Settings.DatabaseName, TableName: s.Configuration.Name}, services.WithBuilder(builderFS))
 	if err != nil {
-		return s.Base.Factory.CreateError(err)
+		return s.Base.Builder.CreateError(err)
 	}
 
-	return s.Base.Factory.CreateResponse(ctx, s.Settings, s.Endpoints...)
+	return s.Base.Builder.CreateResponse(ctx, s.Settings)
 }
 
-func (s *Factory) Init(ctx context.Context, req *factoryv0.InitRequest) (*factoryv0.InitResponse, error) {
+func (s *Builder) Init(ctx context.Context, req *builderv0.InitRequest) (*builderv0.InitResponse, error) {
 	defer s.Wool.Catch()
 
 	s.DependencyEndpoints = req.DependenciesEndpoints
 
-	return s.Factory.InitResponse(configurations.Unknown)
+	return s.Builder.InitResponse(configurations.Unknown)
 }
 
-func (s *Factory) Update(ctx context.Context, req *factoryv0.UpdateRequest) (*factoryv0.UpdateResponse, error) {
+func (s *Builder) Update(ctx context.Context, req *builderv0.UpdateRequest) (*builderv0.UpdateResponse, error) {
 	defer s.Wool.Catch()
 
-	return &factoryv0.UpdateResponse{}, nil
+	return &builderv0.UpdateResponse{}, nil
 }
 
-func (s *Factory) Sync(ctx context.Context, req *factoryv0.SyncRequest) (*factoryv0.SyncResponse, error) {
+func (s *Builder) Sync(ctx context.Context, req *builderv0.SyncRequest) (*builderv0.SyncResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	return &factoryv0.SyncResponse{}, nil
+	return s.Builder.SyncResponse()
 }
 
 type Env struct {
@@ -125,7 +123,7 @@ type DockerTemplating struct {
 	Envs []Env
 }
 
-func (s *Factory) Build(ctx context.Context, req *factoryv0.BuildRequest) (*factoryv0.BuildResponse, error) {
+func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*builderv0.BuildResponse, error) {
 	s.Wool.Debug("building Migration docker image")
 
 	// We want to use DNS to create NetworkMapping
@@ -148,7 +146,7 @@ func (s *Factory) Build(ctx context.Context, req *factoryv0.BuildRequest) (*fact
 	//if err != nil {
 	//	return nil, s.Wool.Wrapf(err, "cannot remove dockerfile")
 	//}
-	//err = s.Templates(nil, services.WithBuilder(builder))
+	//err = s.Templates(nil, services.WithBuilder(builderFS))
 	//if err != nil {
 	//	return nil, s.Wool.Wrapf(err, "cannot copy and apply template")
 	//}
@@ -166,7 +164,7 @@ func (s *Factory) Build(ctx context.Context, req *factoryv0.BuildRequest) (*fact
 	//if err != nil {
 	//	return nil, s.Wool.Wrapf(err, "cannot build image")
 	//}
-	return &factoryv0.BuildResponse{}, nil
+	return &builderv0.BuildResponse{}, nil
 }
 
 type Deployment struct {
@@ -179,7 +177,7 @@ type DeploymentParameter struct {
 	Deployment
 }
 
-func (s *Factory) Deploy(ctx context.Context, req *factoryv0.DeploymentRequest) (*factoryv0.DeploymentResponse, error) {
+func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
 
 	//deploy := DeploymentParameter{Image: s.DockerImage(), Information: s.Information, Deployment: Deployment{Replicas: 1}}
@@ -191,34 +189,14 @@ func (s *Factory) Deploy(ctx context.Context, req *factoryv0.DeploymentRequest) 
 	//if err != nil {
 	//	return nil, err
 	//}
-	return &factoryv0.DeploymentResponse{}, nil
-}
-
-func (s *Factory) Network(es []*basev0.Endpoint) ([]*runtimev0.NetworkMapping, error) {
-	return nil, nil
-	//s.DebugMe("in network: %v", configurations.Condensed(es))
-	//pm, err := network.NewServiceDnsManager(ctx, s.Identity)
-	//if err != nil {
-	//	return nil, s.Wool.Wrapf(err, "cannot create network manager")
-	//}
-	//for _, endpoint := range es {
-	//	err = pm.Expose(endpoint)
-	//	if err != nil {
-	//		return nil, s.Wool.Wrapf(err, "cannot add grpc endpoint to network manager")
-	//	}
-	//}
-	//err = pm.Reserve()
-	//if err != nil {
-	//	return nil, s.Wool.Wrapf(err, "cannot reserve ports")
-	//}
-	//return pm.NetworkMapping()
+	return &builderv0.DeploymentResponse{}, nil
 }
 
 //go:embed templates/factory
-var factory embed.FS
+var factoryFS embed.FS
 
 //go:embed templates/builder
-var builder embed.FS
+var builderFS embed.FS
 
 //go:embed templates/deployment
-var deployment embed.FS
+var deploymentFS embed.FS

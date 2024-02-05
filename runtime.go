@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/codefly-dev/core/agents/helpers/code"
@@ -14,7 +13,6 @@ import (
 	"github.com/codefly-dev/core/agents/services"
 	"github.com/codefly-dev/core/wool"
 
-	"github.com/codefly-dev/core/agents/network"
 	"github.com/codefly-dev/core/configurations"
 	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
 	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
@@ -30,10 +28,11 @@ type Runtime struct {
 	*Service
 
 	// internal
-	Runner               *runners.Docker
+	runner               *runners.Docker
 	EnvironmentVariables *configurations.EnvironmentVariableManager
 
-	Port int
+	Port            int
+	NetworkMappings []*basev0.NetworkMapping
 }
 
 func NewRuntime() *Runtime {
@@ -74,7 +73,7 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 		return s.Base.Runtime.LoadError(err)
 	}
 
-	requirements.WithDir(s.Location)
+	requirements.Localize(s.Location)
 
 	err = s.LoadEndpoints(ctx)
 	if err != nil {
@@ -90,43 +89,47 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	var err error
-	s.NetworkMappings, err = s.CustomNetwork(ctx)
+	s.NetworkMappings = req.NetworkMappings
+
+	net, err := configurations.GetMappingInstance(s.NetworkMappings)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
+	s.LogForward("will run on: %s", net.Address)
 
 	// for docker version
 	s.Port = 5432
-
-	address := s.NetworkMappings[0].Addresses[0]
-	port := strings.Split(address, ":")[1]
 
 	for _, providerInfo := range req.ProviderInfos {
 		s.EnvironmentVariables.Add(configurations.ProviderInformationAsEnvironmentVariables(providerInfo)...)
 	}
 
-	connection, err := s.ConnectionString(ctx, address, true)
+	connection, err := s.ConnectionString(ctx, net.Address, true)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
+
 	// This is the credential exposed to dependencies
 	providerInfo := &basev0.ProviderInformation{Name: "postgres", Origin: s.Service.Configuration.Unique(), Data: map[string]string{"connection": connection}}
 
+	s.Wool.Debug("init", wool.NullableField("provider", providerInfo))
+
 	// Docker
-	s.Runner, err = runners.NewDocker(ctx, runners.WithWorkspace(s.Location))
+	runner, err := runners.NewDocker(ctx)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	s.Runner.WithPort(runners.DockerPort{Container: fmt.Sprintf("%d", s.Port), Host: port})
-	s.Runner.WithEnvironmentVariables(s.EnvironmentVariables.GetBase()...)
-	s.Runner.WithEnvironmentVariables(fmt.Sprintf("POSTGRES_DB=%s", s.DatabaseName))
+	s.runner = runner
+	s.runner.WithPort(runners.DockerPortMapping{Container: s.Port, Host: net.Port})
+	s.runner.WithEnvironmentVariables(s.EnvironmentVariables.GetBase()...)
+	s.runner.WithEnvironmentVariables(fmt.Sprintf("POSTGRES_DB=%s", s.DatabaseName))
+
 	if s.Settings.Silent {
-		s.Runner.Silence()
+		s.runner.Silence()
 	}
 
-	err = s.Runner.Init(ctx, image)
+	err = s.runner.Init(ctx, image)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
@@ -196,12 +199,18 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	err := s.Runner.Start(ctx)
+	runningContext := s.Wool.Inject(context.Background())
+
+	err := s.runner.Start(runningContext)
 	if err != nil {
 		return s.Runtime.StartError(err)
 	}
 
-	address := s.NetworkMappings[0].Addresses[0]
+	instance, err := configurations.GetMappingInstance(s.NetworkMappings)
+	if err != nil {
+		return s.Runtime.StartError(err)
+	}
+	address := instance.Address
 
 	connection, err := s.ConnectionString(ctx, address, true)
 	if err != nil {
@@ -230,24 +239,28 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 }
 
 func (s *Runtime) Information(ctx context.Context, req *runtimev0.InformationRequest) (*runtimev0.InformationResponse, error) {
-	return &runtimev0.InformationResponse{}, nil
+	return s.Runtime.InformationResponse(ctx, req)
 }
 
 func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {
 	defer s.Wool.Catch()
-
 	s.Wool.Debug("stopping service")
-
-	err := s.Runner.Stop()
+	err := s.runner.Stop()
 	if err != nil {
-		return nil, s.Wool.Wrapf(err, "cannot stop runner")
+		return s.Runtime.StopError(err)
+	}
+
+	// Be nice and wait for Port to be free
+	err = runners.WaitForPortUnbound(ctx, s.Port)
+	if err != nil {
+		s.Wool.Warn("cannot wait for port to be free", wool.ErrField(err))
 	}
 
 	err = s.Base.Stop()
 	if err != nil {
-		return nil, err
+		return s.Runtime.StopError(err)
 	}
-	return &runtimev0.StopResponse{}, nil
+	return s.Runtime.StopResponse()
 }
 
 func (s *Runtime) Communicate(ctx context.Context, req *agentv0.Engage) (*agentv0.InformationRequest, error) {
@@ -259,27 +272,6 @@ func (s *Runtime) Communicate(ctx context.Context, req *agentv0.Engage) (*agentv
  */
 
 func (s *Runtime) EventHandler(event code.Change) error {
-	s.WantRestart()
+	s.Runtime.DesiredInit()
 	return nil
-}
-
-func (s *Runtime) CustomNetwork(ctx context.Context) ([]*runtimev0.NetworkMapping, error) {
-	endpoint := s.Endpoints[0]
-	pm, err := network.NewServicePortManager(ctx)
-	if err != nil {
-		return nil, s.Wool.Wrapf(err, "cannot create network manager")
-	}
-	err = pm.Expose(endpoint)
-	if err != nil {
-		return nil, s.Wool.Wrapf(err, "cannot add grpc endpoint to network manager")
-	}
-	err = pm.Reserve(ctx)
-	if err != nil {
-		return nil, s.Wool.Wrapf(err, "cannot reserve ports")
-	}
-	s.Port, err = pm.Port(ctx, endpoint)
-	if err != nil {
-		return nil, s.Wool.Wrapf(err, "cannot get port")
-	}
-	return pm.NetworkMapping(ctx)
 }

@@ -19,9 +19,12 @@ import (
 )
 
 // Agent version
-var agent = shared.Must(configurations.LoadFromFs[configurations.Agent](shared.Embed(info)))
+var agent = shared.Must(configurations.LoadFromFs[configurations.Agent](shared.Embed(infoFS)))
 
-var requirements = builders.NewDependency("migrations", "migrations").WithSelect(shared.NewSelect("*.sql"))
+var requirements = builders.NewDependencies(agent.Name,
+	builders.NewDependency("service.codefly.yaml"),
+	builders.NewDependency("migrations", "migrations").WithPathSelect(shared.NewSelect("*.sql")),
+)
 
 type Settings struct {
 	Debug bool `yaml:"debug"` // Developer only
@@ -45,7 +48,7 @@ type Service struct {
 
 func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInformationRequest) (*agentv0.AgentInformation, error) {
 
-	readme, err := templates.ApplyTemplateFrom(shared.Embed(readme), "templates/agent/README.md", s.Information)
+	readme, err := templates.ApplyTemplateFrom(ctx, shared.Embed(readmeFS), "templates/agent/README.md", s.Information)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -55,11 +58,18 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 			{Type: agentv0.Runtime_DOCKER},
 		},
 		Capabilities: []*agentv0.Capability{
-			{Type: agentv0.Capability_FACTORY},
+			{Type: agentv0.Capability_BUILDER},
 			{Type: agentv0.Capability_RUNTIME},
 		},
 		Protocols: []*agentv0.Protocol{},
-		ReadMe:    readme,
+		ProviderInfos: []*agentv0.ProviderInfoDetail{
+			{
+				Name: "postgres", Description: "postgres credentials",
+				Fields: []*agentv0.ProviderInfoField{
+					{Name: "connection", Description: "connection string"},
+				}},
+		},
+		ReadMe: readme,
 	}, nil
 }
 
@@ -86,12 +96,12 @@ func (s *Service) LoadEndpoints(ctx context.Context) error {
 func main() {
 	agents.Register(
 		services.NewServiceAgent(agent.Of(configurations.ServiceAgent), NewService()),
-		services.NewFactoryAgent(agent.Of(configurations.RuntimeServiceAgent), NewFactory()),
-		services.NewRuntimeAgent(agent.Of(configurations.FactoryServiceAgent), NewRuntime()))
+		services.NewBuilderAgent(agent.Of(configurations.RuntimeServiceAgent), NewBuilder()),
+		services.NewRuntimeAgent(agent.Of(configurations.BuilderServiceAgent), NewRuntime()))
 }
 
 //go:embed agent.codefly.yaml
-var info embed.FS
+var infoFS embed.FS
 
 //go:embed templates/agent
-var readme embed.FS
+var readmeFS embed.FS
