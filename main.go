@@ -33,6 +33,7 @@ type Settings struct {
 	Silent       bool   `yaml:"silent"`
 	DatabaseName string `yaml:"database-name"`
 	WithoutSSL   bool   `yaml:"without-ssl"`
+	Persist      bool   `yaml:"persist"`
 }
 
 var image = runners.DockerImage{Name: "postgres", Tag: "latest"}

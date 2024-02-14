@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/codefly-dev/core/shared"
 	"net/url"
 	"time"
 
@@ -33,6 +34,7 @@ type Runtime struct {
 
 	Port            int
 	NetworkMappings []*basev0.NetworkMapping
+	createDataFirst bool
 }
 
 func NewRuntime() *Runtime {
@@ -89,7 +91,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	s.NetworkMappings = req.NetworkMappings
+	s.NetworkMappings = req.ProposedNetworkMappings
 
 	net, err := configurations.GetMappingInstance(s.NetworkMappings)
 	if err != nil {
@@ -124,6 +126,15 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	s.runner.WithPort(runners.DockerPortMapping{Container: s.Port, Host: net.Port})
 	s.runner.WithEnvironmentVariables(s.EnvironmentVariables.GetBase()...)
 	s.runner.WithEnvironmentVariables(fmt.Sprintf("POSTGRES_DB=%s", s.DatabaseName))
+	// Persist data
+	if s.Settings.Persist {
+		exists, err := shared.CheckDirectoryOrCreate(ctx, s.Local("data"))
+		if err != nil {
+			return s.Runtime.InitError(err)
+		}
+		s.createDataFirst = !exists
+		s.runner.WithMount(s.Local("data"), "/var/lib/postgresql/data")
+	}
 
 	if s.Settings.Silent {
 		s.runner.Silence()
@@ -134,17 +145,21 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(err)
 	}
 
-	return s.Base.Runtime.InitResponse(providerInfo)
+	return s.Base.Runtime.InitResponse(s.NetworkMappings, providerInfo)
 }
 
 func (s *Runtime) WaitForReady(ctx context.Context, connection string) error {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
+	if s.createDataFirst {
+		// Hack for now
+		time.Sleep(5 * time.Second)
+	}
 	maxRetry := 5
 	var err error
 	for retry := 0; retry < maxRetry; retry++ {
-		time.Sleep(time.Second)
+		time.Sleep(1 * time.Second)
 		db, err := sql.Open("postgres", connection)
 		if err != nil {
 			return s.Wool.Wrapf(err, "cannot open database")
@@ -248,12 +263,6 @@ func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtim
 	err := s.runner.Stop()
 	if err != nil {
 		return s.Runtime.StopError(err)
-	}
-
-	// Be nice and wait for Port to be free
-	err = runners.WaitForPortUnbound(ctx, s.Port)
-	if err != nil {
-		s.Wool.Warn("cannot wait for port to be free", wool.ErrField(err))
 	}
 
 	err = s.Base.Stop()
