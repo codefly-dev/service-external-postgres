@@ -111,6 +111,8 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		s.EnvironmentVariables.Add(configurations.ProviderInformationAsEnvironmentVariables(providerInfo)...)
 	}
 
+	s.EnvironmentVariables.Add()
+
 	err = s.CreateConnectionString(ctx, net.Address, true)
 	if err != nil {
 		return s.Runtime.InitError(err)
@@ -129,7 +131,8 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.runner = runner
 	s.runner.WithPort(runners.DockerPortMapping{Container: s.Port, Host: net.Port})
-	s.runner.WithEnvironmentVariables(s.EnvironmentVariables.GetBase()...)
+	//	s.runner.WithEnvironmentVariables(s.EnvironmentVariables.GetBase()...)
+	s.runner.WithEnvironmentVariables("POSTGRES_USER=postgres", "POSTGRES_PASSWORD=password")
 	s.runner.WithEnvironmentVariables(fmt.Sprintf("POSTGRES_DB=%s", s.DatabaseName))
 	// Persist data
 	if s.Settings.Persist {

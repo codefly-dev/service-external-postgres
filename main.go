@@ -6,7 +6,6 @@ import (
 
 	"github.com/codefly-dev/core/builders"
 	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
-	"github.com/codefly-dev/core/runners"
 	"github.com/codefly-dev/core/templates"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -36,7 +35,7 @@ type Settings struct {
 	Persist      bool   `yaml:"persist"`
 }
 
-var image = runners.DockerImage{Name: "postgres", Tag: "latest"}
+var image = &configurations.DockerImage{Name: "postgres", Tag: "latest"}
 
 type Service struct {
 	*services.Base
