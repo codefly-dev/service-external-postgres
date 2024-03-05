@@ -98,6 +98,8 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.NetworkMappings = req.ProposedNetworkMappings
 
+	s.Wool.Focus("info", wool.Field("info", configurations.MakeProviderInformationSummary(req.ProviderInfos)))
+
 	net, err := configurations.GetMappingInstance(s.NetworkMappings)
 	if err != nil {
 		return s.Runtime.InitError(err)
@@ -131,8 +133,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.runner = runner
 	s.runner.WithPort(runners.DockerPortMapping{Container: s.Port, Host: net.Port})
-	//	s.runner.WithEnvironmentVariables(s.EnvironmentVariables.GetBase()...)
-	s.runner.WithEnvironmentVariables("POSTGRES_USER=postgres", "POSTGRES_PASSWORD=password")
+	s.runner.WithEnvironmentVariables(s.EnvironmentVariables.GetBase()...)
 	s.runner.WithEnvironmentVariables(fmt.Sprintf("POSTGRES_DB=%s", s.DatabaseName))
 	// Persist data
 	if s.Settings.Persist {
