@@ -35,8 +35,6 @@ type Settings struct {
 	Persist      bool   `yaml:"persist"`
 }
 
-var image = &configurations.DockerImage{Name: "postgres", Tag: "latest"}
-
 type Service struct {
 	*services.Base
 

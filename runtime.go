@@ -3,12 +3,8 @@ package main
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"github.com/codefly-dev/core/shared"
-	"net/url"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -22,8 +18,6 @@ import (
 	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
 	runtimev0 "github.com/codefly-dev/core/generated/go/services/runtime/v0"
 	"github.com/codefly-dev/core/runners"
-	"github.com/golang-migrate/migrate/v4"
-	"github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	_ "github.com/lib/pq"
 )
@@ -46,6 +40,8 @@ func NewRuntime() *Runtime {
 		Service: NewService(),
 	}
 }
+
+var runnerImage = &configurations.DockerImage{Name: "postgres", Tag: "16.1"}
 
 const (
 	DefaultPostgresUser     = "postgres"
@@ -113,8 +109,6 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		s.EnvironmentVariables.Add(configurations.ProviderInformationAsEnvironmentVariables(providerInfo)...)
 	}
 
-	s.EnvironmentVariables.Add()
-
 	err = s.CreateConnectionString(ctx, net.Address, true)
 	if err != nil {
 		return s.Runtime.InitError(err)
@@ -132,9 +126,11 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	}
 
 	s.runner = runner
+	s.runner.WithOut(s.Wool)
 	s.runner.WithPort(runners.DockerPortMapping{Container: s.Port, Host: net.Port})
 	s.runner.WithEnvironmentVariables(s.EnvironmentVariables.GetBase()...)
 	s.runner.WithEnvironmentVariables(fmt.Sprintf("POSTGRES_DB=%s", s.DatabaseName))
+
 	// Persist data
 	if s.Settings.Persist {
 		exists, err := shared.CheckDirectoryOrCreate(ctx, s.Local("data"))
@@ -149,7 +145,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		s.runner.Silence()
 	}
 
-	err = s.runner.Init(ctx, image)
+	err = s.runner.Init(ctx, runnerImage)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
@@ -181,96 +177,6 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 		time.Sleep(3 * time.Second)
 	}
 	return s.Wool.Wrapf(err, "cannot ping database")
-}
-
-func (s *Runtime) migrationPath() string {
-	absolutePath := s.Local("migrations")
-	u := url.URL{
-		Scheme: "file",
-		Path:   absolutePath,
-	}
-	return u.String()
-}
-
-func (s *Runtime) applyMigration(ctx context.Context) error {
-	defer s.Wool.Catch()
-	ctx = s.Wool.Inject(ctx)
-
-	maxRetry := 30
-	for retry := 0; retry < maxRetry; retry++ {
-		db, err := sql.Open("postgres", s.connection)
-		if err != nil {
-			return s.Wool.Wrapf(err, "cannot open database")
-		}
-		driver, err := postgres.WithInstance(db, &postgres.Config{DatabaseName: s.Settings.DatabaseName})
-		if err != nil {
-			time.Sleep(3 * time.Second)
-			continue
-		}
-
-		m, err := migrate.NewWithDatabaseInstance(
-			s.migrationPath(),
-			s.Settings.DatabaseName, driver)
-		if err != nil {
-			return s.Wool.Wrapf(err, "cannot create migration")
-		}
-		if err := m.Up(); err == nil {
-			return nil
-		} else {
-			if errors.Is(err, migrate.ErrNoChange) {
-				return nil
-			}
-		}
-		s.Wool.Debug("waiting for database")
-	}
-	return s.Wool.NewError("cannot apply migration: retries exceeded")
-}
-
-func (s *Runtime) updateMigration(ctx context.Context, migrationFile string) error {
-	defer s.Wool.Catch()
-	ctx = s.Wool.Inject(ctx)
-
-	// Extract the migration number
-	base := filepath.Base(migrationFile)
-	s.Wool.Info(fmt.Sprintf("applying migration: %v", base))
-	_migrationNumber := strings.Split(base, "_")[0]
-	migrationNumber, err := strconv.Atoi(_migrationNumber)
-	if err != nil {
-		return s.Wool.Wrapf(err, "cannot parse migration number")
-	}
-
-	db, err := sql.Open("postgres", s.connection)
-	if err != nil {
-		return s.Wool.Wrapf(err, "cannot open database")
-	}
-	driver, err := postgres.WithInstance(db, &postgres.Config{DatabaseName: s.Settings.DatabaseName})
-	if err != nil {
-		return s.Wool.Wrapf(err, "cannot create driver")
-	}
-
-	m, err := migrate.NewWithDatabaseInstance(
-		s.migrationPath(),
-		s.Settings.DatabaseName, driver)
-	if err != nil {
-		return s.Wool.Wrapf(err, "cannot create migration")
-	}
-	if err := m.Force(migrationNumber); err != nil {
-		return s.Wool.Wrapf(err, "cannot force migration")
-	}
-	// Now, re-apply migration by moving down.
-	if err := m.Down(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		return s.Wool.Wrapf(err, "cannot apply migration")
-	}
-	// Now, re-apply migration by moving up.
-	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		return s.Wool.Wrapf(err, "cannot apply migration")
-	}
-	// Optionally, check if there are any errors in the migration process
-	var errMigrate migrate.ErrDirty
-	if errors.As(err, &errMigrate) {
-		return s.Wool.Wrapf(err, "migration is dirty")
-	}
-	return s.Wool.Wrapf(err, "migration applied")
 }
 
 func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runtimev0.StartResponse, error) {
@@ -316,12 +222,13 @@ func (s *Runtime) Information(ctx context.Context, req *runtimev0.InformationReq
 func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {
 	defer s.Wool.Catch()
 	s.Wool.Debug("stopping service")
-	err := s.runner.Stop()
-	if err != nil {
-		return s.Runtime.StopError(err)
+	if s.runner == nil {
+		err := s.runner.Stop()
+		if err != nil {
+			return s.Runtime.StopError(err)
+		}
 	}
-
-	err = s.Base.Stop()
+	err := s.Base.Stop()
 	if err != nil {
 		return s.Runtime.StopError(err)
 	}

@@ -1,18 +1,13 @@
-# Use an official KrakenD base image
-FROM devopsfaith/krakend
+FROM alpine
 
-# Set the working directory inside the container
 WORKDIR /app
 
-COPY config/krakend.tmpl /app/krakend.tmpl
-ADD codefly/builder/settings /app/settings
+RUN apk add --no-cache curl
+RUN curl -L https://github.com/golang-migrate/migrate/releases/download/v4.15.0/migrate.linux-amd64.tar.gz | tar xvz
+RUN mv migrate /usr/local/bin/migrate
 
-# Set environment variables
-ENV FC_ENABLE=1
-ENV FC_SETTINGS="/app/settings"
+COPY . .
 
-# Expose the port KrakenD runs on
-EXPOSE 8080
+COPY migrations /app/migrations
 
-# Command to run KrakenD
-CMD ["krakend", "run", "-c", "/app/krakend.tmpl"]
+CMD migrate -path /app/migrations -database ${{.ConnectionStringHolder}} up
