@@ -6,6 +6,7 @@ import (
 	"fmt"
 	dockerhelpers "github.com/codefly-dev/core/agents/helpers/docker"
 	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
+	"github.com/codefly-dev/core/wool"
 
 	"github.com/codefly-dev/core/agents/communicate"
 	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
@@ -19,7 +20,12 @@ import (
 
 type Builder struct {
 	*Service
-	NetworkMappings []*basev0.NetworkMapping
+	NetworkMappings      []*basev0.NetworkMapping
+	EnvironmentVariables *configurations.EnvironmentVariableManager
+
+	ConnectionKey string
+
+	connection string
 }
 
 func NewBuilder() *Builder {
@@ -37,6 +43,14 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 	}
 
 	requirements.Localize(s.Location)
+
+	s.EnvironmentVariables = configurations.NewEnvironmentVariableManager()
+
+	info := &basev0.ProviderInformation{
+		Name:   "postgres",
+		Origin: s.Configuration.Unique(),
+	}
+	s.ConnectionKey = configurations.ProviderInformationEnvKey(info, "connection")
 
 	err = s.LoadEndpoints(ctx)
 	if err != nil {
@@ -64,6 +78,13 @@ func (s *Builder) Init(ctx context.Context, req *builderv0.InitRequest) (*builde
 
 	s.DependencyEndpoints = req.DependenciesEndpoints
 
+	info, err := configurations.FindServiceProvider(s.Configuration.Unique(), "postgres", req.ProviderInfos)
+	if err != nil {
+		return s.Builder.InitError(err)
+	}
+	s.Wool.Focus("init", wool.Field("provider", info.Data))
+	s.EnvironmentVariables.Add(configurations.ProviderInformationAsEnvironmentVariables(info)...)
+
 	return s.Builder.InitResponse(s.NetworkMappings, configurations.Unknown)
 }
 
@@ -86,7 +107,7 @@ type Env struct {
 }
 
 type DockerTemplating struct {
-	ConnectionStringHolder string
+	ConnectionStringKeyHolder string
 }
 
 func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*builderv0.BuildResponse, error) {
@@ -100,14 +121,7 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 		return s.Builder.BuildError(fmt.Errorf("invalid docker runnerImage name: %s", image.Name))
 	}
 
-	// We want the placeholder to match the environment variable for provider info for connection string
-	info := &basev0.ProviderInformation{
-		Name:   "postgres",
-		Origin: s.Configuration.Unique(),
-	}
-	key := configurations.ProviderInformationEnvKey(info, "connection")
-
-	docker := DockerTemplating{ConnectionStringHolder: key}
+	docker := DockerTemplating{ConnectionStringKeyHolder: fmt.Sprintf("${%s}", s.ConnectionKey)}
 
 	err := shared.DeleteFile(ctx, s.Local("builder/Dockerfile"))
 	if err != nil {
@@ -148,16 +162,20 @@ type DeploymentParameter struct {
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
 
-	//deploy := DeploymentParameter{Image: s.DockerImage(), Information: s.Information, Deployment: Deployment{Replicas: 1}}
-	//err := s.Templates(deploy,
-	//	services.WithDeploymentFor(deployment, "kustomize/base", templates.WithOverrideAll()),
-	//	services.WithDeploymentFor(deployment, "kustomize/overlays/environment",
-	//		services.WithDestination("kustomize/overlays/%s", req.Environment.Name), templates.WithOverrideAll()),
-	//)
-	//if err != nil {
-	//	return nil, err
-	//}
-	return &builderv0.DeploymentResponse{}, nil
+	// Only need the "connection"
+	connectionEnv := s.EnvironmentVariables.Find(s.ConnectionKey)
+	if connectionEnv == "" {
+		return s.Builder.DeployError(s.Errorf("cannot find connection string"))
+	}
+
+	secret := services.EnvsAsSecretData(connectionEnv)
+	params := services.DeploymentParameter{SecretMap: secret}
+
+	err := s.Builder.Deploy(ctx, req, deploymentFS, params)
+	if err != nil {
+		return s.Builder.DeployError(err)
+	}
+	return s.Builder.DeployResponse()
 }
 
 const Watch = "watch"

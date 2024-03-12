@@ -114,6 +114,8 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(err)
 	}
 
+	s.Wool.Info("connection", wool.Field("connection", s.connection))
+
 	// This is the credential exposed to dependencies
 	providerInfo := &basev0.ProviderInformation{Name: "postgres", Origin: s.Service.Configuration.Unique(), Data: map[string]string{"connection": s.connection}}
 
@@ -198,17 +200,19 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		return s.Runtime.StartError(err)
 	}
 
-	s.Wool.Debug("applying migrations")
-	err = s.applyMigration(ctx)
-	if err != nil {
-		return s.Runtime.StartError(err)
-	}
-
-	if s.Settings.Watch {
-		conf := services.NewWatchConfiguration(requirements)
-		err := s.SetupWatcher(ctx, conf, s.EventHandler)
+	if !s.Settings.NoMigration {
+		s.Wool.Debug("applying migrations")
+		err = s.applyMigration(ctx)
 		if err != nil {
-			s.Wool.Warn("error in watcher", wool.ErrField(err))
+			return s.Runtime.StartError(err)
+		}
+
+		if s.Settings.Watch {
+			conf := services.NewWatchConfiguration(requirements)
+			err := s.SetupWatcher(ctx, conf, s.EventHandler)
+			if err != nil {
+				s.Wool.Warn("error in watcher", wool.ErrField(err))
+			}
 		}
 	}
 	s.Wool.Debug("start done")
@@ -222,7 +226,7 @@ func (s *Runtime) Information(ctx context.Context, req *runtimev0.InformationReq
 func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {
 	defer s.Wool.Catch()
 	s.Wool.Debug("stopping service")
-	if s.runner == nil {
+	if s.runner != nil {
 		err := s.runner.Stop()
 		if err != nil {
 			return s.Runtime.StopError(err)

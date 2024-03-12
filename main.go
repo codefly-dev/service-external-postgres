@@ -33,6 +33,8 @@ type Settings struct {
 	DatabaseName string `yaml:"database-name"`
 	WithoutSSL   bool   `yaml:"without-ssl"`
 	Persist      bool   `yaml:"persist"`
+
+	NoMigration bool `yaml:"no-migration"` // Developer only
 }
 
 type Service struct {
