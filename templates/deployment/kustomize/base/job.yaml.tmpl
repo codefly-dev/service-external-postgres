@@ -1,15 +1,15 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ .Service.Unique.DNSCase }}
-  namespace: {{ .Service.Namespace }}
+  name: {{ .Service.Name.DNSCase }}
+  namespace: {{ .Namespace }}
 spec:
   template:
     spec:
       containers:
-        - name: {{ .Service.Unique.DNSCase }}
+        - name: {{ .Service.Name.DNSCase }}
           image: image:tag
           envFrom:
             - secretRef:
-                name: secret-{{ .Service.Unique.DNSCase }}
+                name: secret-{{ .Service.Name.DNSCase }}
       restartPolicy: Never

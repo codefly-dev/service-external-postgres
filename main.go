@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"fmt"
 
 	"github.com/codefly-dev/core/builders"
 	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
@@ -28,11 +29,12 @@ var requirements = builders.NewDependencies(agent.Name,
 type Settings struct {
 	Debug bool `yaml:"debug"` // Developer only
 
-	Watch        bool   `yaml:"watch"`
-	Silent       bool   `yaml:"silent"`
 	DatabaseName string `yaml:"database-name"`
-	WithoutSSL   bool   `yaml:"without-ssl"`
-	Persist      bool   `yaml:"persist"`
+	WithoutSSL   bool   `yaml:"without-ssl"` // Default to SSL
+
+	Watch   bool `yaml:"watch"`
+	Silent  bool `yaml:"silent"`
+	Persist bool `yaml:"persist"`
 
 	NoMigration bool `yaml:"no-migration"` // Developer only
 }
@@ -43,7 +45,10 @@ type Service struct {
 	// Settings
 	*Settings
 
-	endpoint *configurations.Endpoint
+	connectionKey string
+	connection    string
+
+	tcpEndpoint *basev0.Endpoint
 }
 
 func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInformationRequest) (*agentv0.AgentInformation, error) {
@@ -82,14 +87,32 @@ func NewService() *Service {
 
 func (s *Service) LoadEndpoints(ctx context.Context) error {
 	//	visibility := configurations.VisibilityApplication
-	s.endpoint = &configurations.Endpoint{Name: "psql", Visibility: configurations.VisibilityApplication}
-	s.endpoint.Application = s.Configuration.Application
-	s.endpoint.Service = s.Configuration.Name
-	endpoint, err := configurations.NewTCPAPI(ctx, s.endpoint)
+	endpoint := &configurations.Endpoint{Name: "psql", Visibility: configurations.VisibilityPublic}
+	endpoint.Application = s.Configuration.Application
+	endpoint.Service = s.Configuration.Name
+	tcp, err := configurations.NewTCPAPI(ctx, endpoint)
 	if err != nil {
-		return s.Wool.Wrapf(err, "cannot  create rest endpoint")
+		return s.Wool.Wrapf(err, "cannot  create rest tcpEndpoint")
 	}
-	s.Endpoints = []*basev0.Endpoint{endpoint}
+	s.Endpoints = []*basev0.Endpoint{tcp}
+	s.tcpEndpoint = tcp
+	return nil
+}
+
+func (s *Service) CreateConnectionString(ctx context.Context, address string, withoutSSL bool) error {
+	user, err := s.EnvironmentVariables.GetServiceProvider(ctx, s.Unique(), "postgres", "POSTGRES_USER")
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot get user")
+	}
+	password, err := s.EnvironmentVariables.GetServiceProvider(ctx, s.Unique(), "postgres", "POSTGRES_PASSWORD")
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot get password")
+	}
+	connection := fmt.Sprintf("postgresql://%s:%s@%s/%s", user, password, address, s.DatabaseName)
+	if withoutSSL {
+		connection += "?sslmode=disable"
+	}
+	s.connection = connection
 	return nil
 }
 

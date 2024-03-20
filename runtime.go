@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"github.com/codefly-dev/core/shared"
 	"strings"
 	"time"
 
@@ -26,13 +25,8 @@ type Runtime struct {
 	*Service
 
 	// internal
-	runner               *runners.Docker
-	EnvironmentVariables *configurations.EnvironmentVariableManager
-
-	Port            int
-	NetworkMappings []*basev0.NetworkMapping
-	createDataFirst bool
-	connection      string
+	runner *runners.Docker
+	port   int32
 }
 
 func NewRuntime() *Runtime {
@@ -42,30 +36,6 @@ func NewRuntime() *Runtime {
 }
 
 var runnerImage = &configurations.DockerImage{Name: "postgres", Tag: "16.1"}
-
-const (
-	DefaultPostgresUser     = "postgres"
-	DefaultPostgresPassword = "password"
-)
-
-func (s *Runtime) CreateConnectionString(ctx context.Context, address string, withoutSSL bool) error {
-	user, err := s.EnvironmentVariables.GetServiceProvider(ctx, s.Unique(), "postgres", "POSTGRES_USER")
-	if err != nil {
-		s.Wool.Warn("using default user")
-		user = DefaultPostgresUser
-	}
-	password, err := s.EnvironmentVariables.GetServiceProvider(ctx, s.Unique(), "postgres", "POSTGRES_PASSWORD")
-	if err != nil {
-		s.Wool.Warn("using default")
-		password = DefaultPostgresPassword
-	}
-	connection := fmt.Sprintf("postgresql://%s:%s@%s/%s", user, password, address, s.DatabaseName)
-	if withoutSSL {
-		connection += "?sslmode=disable"
-	}
-	s.connection = connection
-	return nil
-}
 
 func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtimev0.LoadResponse, error) {
 	defer s.Wool.Catch()
@@ -83,8 +53,6 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 		return s.Base.Runtime.LoadError(err)
 	}
 
-	s.EnvironmentVariables = configurations.NewEnvironmentVariableManager()
-
 	return s.Base.Runtime.LoadResponse()
 }
 
@@ -94,22 +62,27 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.NetworkMappings = req.ProposedNetworkMappings
 
-	s.Wool.Focus("info", wool.Field("info", configurations.MakeProviderInformationSummary(req.ProviderInfos)))
+	s.Wool.Focus("init",
+		wool.Field("info", configurations.MakeProviderInformationSummary(req.ProviderInfos)),
+		wool.Field("network mappings", configurations.MakeNetworkMappingSummary(s.NetworkMappings)))
 
-	net, err := configurations.GetMappingInstance(s.NetworkMappings)
+	net, err := configurations.FindNetworkMapping(s.tcpEndpoint, s.NetworkMappings)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
-	s.LogForward("will run on: %s", net.Address)
+
+	s.Focus("port", wool.Field("port", net.Port))
+	s.LogForward("will run on address: %s", net.Address)
 
 	// for docker version
-	s.Port = 5432
+	s.port = 5432
 
 	for _, providerInfo := range req.ProviderInfos {
 		s.EnvironmentVariables.Add(configurations.ProviderInformationAsEnvironmentVariables(providerInfo)...)
 	}
 
 	err = s.CreateConnectionString(ctx, net.Address, true)
+
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
@@ -117,9 +90,9 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	s.Wool.Info("connection", wool.Field("connection", s.connection))
 
 	// This is the credential exposed to dependencies
-	providerInfo := &basev0.ProviderInformation{Name: "postgres", Origin: s.Service.Configuration.Unique(), Data: map[string]string{"connection": s.connection}}
+	connectionString := &basev0.ProviderInformation{Name: "postgres", Origin: s.Service.Configuration.Unique(), Data: map[string]string{"connection": s.connection}}
 
-	s.Wool.Debug("init", wool.NullableField("provider", providerInfo))
+	s.ServiceProviderInfos = []*basev0.ProviderInformation{connectionString}
 
 	// Docker
 	runner, err := runners.NewDocker(ctx)
@@ -128,23 +101,17 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	}
 
 	s.runner = runner
+	if s.Settings.Persist {
+		s.runner.WithPersistence()
+	}
+	s.runner.WithName(s.Global())
 	s.runner.WithOut(s.Wool)
-	s.runner.WithPort(runners.DockerPortMapping{Container: s.Port, Host: net.Port})
+	s.runner.WithPort(runners.DockerPortMapping{Container: s.port, Host: net.Port})
 	s.runner.WithEnvironmentVariables(s.EnvironmentVariables.GetBase()...)
 	s.runner.WithEnvironmentVariables(fmt.Sprintf("POSTGRES_DB=%s", s.DatabaseName))
 
-	// Persist data
-	if s.Settings.Persist {
-		exists, err := shared.CheckDirectoryOrCreate(ctx, s.Local("data"))
-		if err != nil {
-			return s.Runtime.InitError(err)
-		}
-		s.createDataFirst = !exists
-		s.runner.WithMount(s.Local("data"), "/var/lib/postgresql/data")
-	}
-
 	if s.Settings.Silent {
-		s.runner.Silence()
+		s.runner.WithSilence()
 	}
 
 	err = s.runner.Init(ctx, runnerImage)
@@ -152,12 +119,14 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(err)
 	}
 
-	return s.Base.Runtime.InitResponse(s.NetworkMappings, providerInfo)
+	return s.Base.Runtime.InitResponse()
 }
 
 func (s *Runtime) WaitForReady(ctx context.Context) error {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
+
+	s.Wool.Focus("waiting for ready", wool.Field("connection", s.connection))
 
 	maxRetry := 20
 	var err error
@@ -195,6 +164,7 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	}
 
 	s.Wool.Debug("waiting for ready")
+
 	err = s.WaitForReady(ctx)
 	if err != nil {
 		return s.Runtime.StartError(err)
@@ -226,6 +196,7 @@ func (s *Runtime) Information(ctx context.Context, req *runtimev0.InformationReq
 func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {
 	defer s.Wool.Catch()
 	s.Wool.Debug("stopping service")
+
 	if s.runner != nil {
 		err := s.runner.Stop()
 		if err != nil {

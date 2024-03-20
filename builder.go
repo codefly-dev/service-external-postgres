@@ -20,12 +20,6 @@ import (
 
 type Builder struct {
 	*Service
-	NetworkMappings      []*basev0.NetworkMapping
-	EnvironmentVariables *configurations.EnvironmentVariableManager
-
-	ConnectionKey string
-
-	connection string
 }
 
 func NewBuilder() *Builder {
@@ -44,13 +38,11 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 
 	requirements.Localize(s.Location)
 
-	s.EnvironmentVariables = configurations.NewEnvironmentVariableManager()
-
 	info := &basev0.ProviderInformation{
 		Name:   "postgres",
 		Origin: s.Configuration.Unique(),
 	}
-	s.ConnectionKey = configurations.ProviderInformationEnvKey(info, "connection")
+	s.connectionKey = configurations.ProviderInformationEnvKey(info, "connection")
 
 	err = s.LoadEndpoints(ctx)
 	if err != nil {
@@ -76,16 +68,38 @@ func (s *Builder) Init(ctx context.Context, req *builderv0.InitRequest) (*builde
 
 	s.NetworkMappings = req.ProposedNetworkMappings
 
+	net, err := configurations.FindNetworkMapping(s.tcpEndpoint, s.NetworkMappings)
+	if err != nil {
+		return nil, s.Wool.Wrapf(err, "cannot get network mappings")
+	}
+
 	s.DependencyEndpoints = req.DependenciesEndpoints
 
+	// Load credentials
 	info, err := configurations.FindServiceProvider(s.Configuration.Unique(), "postgres", req.ProviderInfos)
 	if err != nil {
 		return s.Builder.InitError(err)
 	}
-	s.Wool.Focus("init", wool.Field("provider", info.Data))
+
 	s.EnvironmentVariables.Add(configurations.ProviderInformationAsEnvironmentVariables(info)...)
 
-	return s.Builder.InitResponse(s.NetworkMappings, configurations.Unknown)
+	// Create a connection string
+	err = s.CreateConnectionString(ctx, net.Address, s.Settings.WithoutSSL)
+
+	s.Wool.Focus("init", wool.Field("provider", info.Data))
+
+	// This is the credential exposed to dependencies
+	s.ServiceProviderInfos = []*basev0.ProviderInformation{
+		{Name: "postgres",
+			Origin: s.Service.Configuration.Unique(),
+			Data:   map[string]string{"connection": s.connection},
+		},
+	}
+	s.Wool.Focus("writing", wool.Field("key", s.connectionKey), wool.Field("connection", s.connection))
+
+	s.EnvironmentVariables.Add(fmt.Sprintf("%s=%s", s.connectionKey, s.connection))
+
+	return s.Builder.InitResponse()
 }
 
 func (s *Builder) Update(ctx context.Context, req *builderv0.UpdateRequest) (*builderv0.UpdateResponse, error) {
@@ -121,7 +135,7 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 		return s.Builder.BuildError(fmt.Errorf("invalid docker runnerImage name: %s", image.Name))
 	}
 
-	docker := DockerTemplating{ConnectionStringKeyHolder: fmt.Sprintf("${%s}", s.ConnectionKey)}
+	docker := DockerTemplating{ConnectionStringKeyHolder: fmt.Sprintf("${%s}", s.connectionKey)}
 
 	err := shared.DeleteFile(ctx, s.Local("builder/Dockerfile"))
 	if err != nil {
@@ -149,29 +163,32 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	return s.Builder.BuildResponse()
 }
 
-type Deployment struct {
-	Replicas int
-}
-
 type DeploymentParameter struct {
 	Image *configurations.DockerImage
 	*services.Information
-	Deployment
+	SecretMap services.EnvironmentMap
 }
 
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
 
 	// Only need the "connection"
-	connectionEnv := s.EnvironmentVariables.Find(s.ConnectionKey)
-	if connectionEnv == "" {
+	connectionEnv, err := s.EnvironmentVariables.Find(ctx, s.connectionKey)
+	if err != nil {
 		return s.Builder.DeployError(s.Errorf("cannot find connection string"))
 	}
+	s.Wool.Focus("connection", wool.Field("env", connectionEnv))
 
-	secret := services.EnvsAsSecretData(connectionEnv)
-	params := services.DeploymentParameter{SecretMap: secret}
+	secret, err := services.EnvsAsSecretData(connectionEnv)
+	if err != nil {
+		return s.Builder.DeployError(err)
+	}
 
-	err := s.Builder.Deploy(ctx, req, deploymentFS, params)
+	params := DeploymentParameter{
+		SecretMap: secret,
+	}
+
+	err = s.Builder.Deploy(ctx, req, deploymentFS, params)
 	if err != nil {
 		return s.Builder.DeployError(err)
 	}
