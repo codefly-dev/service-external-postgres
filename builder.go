@@ -31,10 +31,14 @@ func NewBuilder() *Builder {
 func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builderv0.LoadResponse, error) {
 	defer s.Wool.Catch()
 
+	ctx = s.Wool.Inject(ctx)
+
 	err := s.Base.Load(ctx, req.Identity, s.Settings)
 	if err != nil {
 		return nil, err
 	}
+
+	s.Wool.Focus("base loaded", wool.Field("identity", s.Identity))
 
 	requirements.Localize(s.Location)
 
@@ -48,6 +52,8 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 	if err != nil {
 		return s.Builder.LoadError(err)
 	}
+
+	s.Wool.Focus("endpoint", wool.Field("tcp", s.tcpEndpoint))
 
 	gettingStarted, err := templates.ApplyTemplateFrom(ctx, shared.Embed(factoryFS), "templates/factory/GETTING_STARTED.md", s.Information)
 	if err != nil {
@@ -129,7 +135,7 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 
 	s.Wool.Debug("building migration docker runnerImage")
 
-	ctx = s.WoolAgent.Inject(ctx)
+	ctx = s.Wool.Inject(ctx)
 
 	image := s.DockerImage(req.BuildContext)
 
