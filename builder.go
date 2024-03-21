@@ -125,6 +125,8 @@ type DockerTemplating struct {
 }
 
 func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*builderv0.BuildResponse, error) {
+	defer s.Wool.Catch()
+
 	s.Wool.Debug("building migration docker runnerImage")
 
 	ctx = s.WoolAgent.Inject(ctx)

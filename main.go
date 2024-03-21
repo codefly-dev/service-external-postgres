@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"github.com/codefly-dev/core/configurations/standards"
 
 	"github.com/codefly-dev/core/builders"
 	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
@@ -86,16 +87,22 @@ func NewService() *Service {
 }
 
 func (s *Service) LoadEndpoints(ctx context.Context) error {
-	//	visibility := configurations.VisibilityApplication
-	endpoint := &configurations.Endpoint{Name: "psql", Visibility: configurations.VisibilityPublic}
-	endpoint.Application = s.Configuration.Application
-	endpoint.Service = s.Configuration.Name
-	tcp, err := configurations.NewTCPAPI(ctx, endpoint)
-	if err != nil {
-		return s.Wool.Wrapf(err, "cannot  create rest tcpEndpoint")
+	defer s.Wool.Catch()
+	s.Endpoints = []*basev0.Endpoint{}
+	var err error
+	for _, endpoint := range s.Configuration.Endpoints {
+		endpoint.Application = s.Configuration.Application
+		endpoint.Service = s.Configuration.Name
+		switch endpoint.API {
+		case standards.TCP:
+			s.tcpEndpoint, err = configurations.NewTCPAPI(ctx, endpoint)
+			if err != nil {
+				return s.Wool.Wrapf(err, "cannot create tcp api")
+			}
+			s.Endpoints = append(s.Endpoints, s.tcpEndpoint)
+			continue
+		}
 	}
-	s.Endpoints = []*basev0.Endpoint{tcp}
-	s.tcpEndpoint = tcp
 	return nil
 }
 
