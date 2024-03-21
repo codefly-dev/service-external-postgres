@@ -121,11 +121,6 @@ func (s *Builder) Sync(ctx context.Context, req *builderv0.SyncRequest) (*builde
 	return s.Builder.SyncResponse()
 }
 
-type Env struct {
-	Key   string
-	Value string
-}
-
 type DockerTemplating struct {
 	ConnectionStringKeyHolder string
 }
@@ -171,16 +166,10 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	return s.Builder.BuildResponse()
 }
 
-type DeploymentParameter struct {
-	Image *configurations.DockerImage
-	*services.Information
-	SecretMap services.EnvironmentMap
-}
-
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
 
-	// Only need the "connection"
+	// Only expose the "connection"
 	connectionEnv, err := s.EnvironmentVariables.Find(ctx, s.connectionKey)
 	if err != nil {
 		return s.Builder.DeployError(s.Errorf("cannot find connection string"))
@@ -192,11 +181,11 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 		return s.Builder.DeployError(err)
 	}
 
-	params := DeploymentParameter{
+	params := services.DeploymentParameters{
 		SecretMap: secret,
 	}
 
-	err = s.Builder.Deploy(ctx, req, deploymentFS, params)
+	err = s.Builder.GenericServiceDeploy(ctx, req, deploymentFS, params)
 	if err != nil {
 		return s.Builder.DeployError(err)
 	}
