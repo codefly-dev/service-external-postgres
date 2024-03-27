@@ -37,6 +37,8 @@ type Settings struct {
 	NoMigration bool `yaml:"no-migration"` // Developer only
 }
 
+var runnerImage = &configurations.DockerImage{Name: "postgres", Tag: "16.1"}
+
 type Service struct {
 	*services.Base
 

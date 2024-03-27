@@ -36,23 +36,19 @@ func NewRuntime() *Runtime {
 	}
 }
 
-var runnerImage = &configurations.DockerImage{Name: "postgres", Tag: "16.1"}
-
 func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtimev0.LoadResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	w := s.Wool.In("load")
-
-	err := s.Base.Load(ctx, req.Identity, s.Settings)
-	if err != nil {
-		return s.Base.Runtime.LoadError(err)
+	if s.Runtime.Scope != basev0.RuntimeScope_Container {
+		return s.Base.Runtime.LoadError(fmt.Errorf("not implemented: cannot load service in scope %s", req.Scope))
 	}
 
 	s.Runtime.Scope = req.Scope
 
-	if s.Runtime.Scope != basev0.RuntimeScope_Container {
-		return s.Base.Runtime.LoadError(fmt.Errorf("not implemented: cannot load service in scope %s", req.Scope))
+	err := s.Base.Load(ctx, req.Identity, s.Settings)
+	if err != nil {
+		return s.Base.Runtime.LoadError(err)
 	}
 
 	requirements.Localize(s.Location)
@@ -63,7 +59,7 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 		return s.Base.Runtime.LoadError(err)
 	}
 
-	w.Focus("endpoints", wool.Field("endpoints", configurations.MakeManyEndpointSummary(s.Endpoints)))
+	s.Wool.Focus("endpoints", wool.Field("endpoints", configurations.MakeManyEndpointSummary(s.Endpoints)))
 
 	s.tcpEndpoint, err = configurations.FindTCPEndpoint(ctx, s.Endpoints)
 	if err != nil {
@@ -128,13 +124,11 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	w := s.Wool.In("init")
+	s.Runtime.LogInitRequest(req)
+
+	w := s.Wool.In("runtime::init")
 
 	s.NetworkMappings = req.ProposedNetworkMappings
-
-	w.Focus("network", wool.Field("endpoint", configurations.MakeEndpointSummary(s.tcpEndpoint)))
-
-	w.Focus("proposed network mapping", wool.Field("network", configurations.MakeManyNetworkMappingSummary(req.ProposedNetworkMappings)))
 
 	s.NetworkMappings = req.ProposedNetworkMappings
 
@@ -155,11 +149,6 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.LogForward("will run on localhost:%d", instance.Port)
 	s.postgresPort = 5432
-
-	// Configurations
-	w.Focus("configurations",
-		wool.Field("service configuration", configurations.MakeConfigurationSummary(req.Configuration)),
-		wool.Field("dependency configurations", configurations.MakeManyConfigurationSummary(req.DependenciesConfigurations)))
 
 	// Create connection string configurations for the network instance
 	for _, inst := range net.Instances {

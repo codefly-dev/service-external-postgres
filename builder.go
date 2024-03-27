@@ -94,7 +94,7 @@ func (s *Builder) Init(ctx context.Context, req *builderv0.InitRequest) (*builde
 	//s.EnvironmentVariables.Add(configurations.ProviderInformationAsEnvironmentVariables(info)...)
 	//
 	//// Create a connection string
-	//err = s.CreateConnectionString(ctx, net.Address, s.Settings.WithoutSSL)
+	//err = s.CreateConnectionConfiguration(ctx, net.Address, s.Settings.WithoutSSL)
 	//
 	//s.Wool.Focus("init", wool.Field("provider", info.Data))
 	////
