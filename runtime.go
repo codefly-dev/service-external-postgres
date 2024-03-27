@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
 	"strings"
 	"time"
 
@@ -13,7 +14,6 @@ import (
 	"github.com/codefly-dev/core/wool"
 
 	"github.com/codefly-dev/core/configurations"
-	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
 	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
 	runtimev0 "github.com/codefly-dev/core/generated/go/services/runtime/v0"
 	"github.com/codefly-dev/core/runners"
@@ -25,8 +25,9 @@ type Runtime struct {
 	*Service
 
 	// internal
-	runner *runners.Docker
-	port   int32
+	runner runners.Runner
+
+	postgresPort uint16
 }
 
 func NewRuntime() *Runtime {
@@ -41,80 +42,177 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
+	w := s.Wool.In("load")
+
 	err := s.Base.Load(ctx, req.Identity, s.Settings)
 	if err != nil {
 		return s.Base.Runtime.LoadError(err)
 	}
 
+	s.Runtime.Scope = req.Scope
+
+	if s.Runtime.Scope != basev0.RuntimeScope_Container {
+		return s.Base.Runtime.LoadError(fmt.Errorf("not implemented: cannot load service in scope %s", req.Scope))
+	}
+
 	requirements.Localize(s.Location)
 
-	err = s.LoadEndpoints(ctx)
+	// Endpoints
+	s.Endpoints, err = s.Runtime.Service.LoadEndpoints(ctx)
 	if err != nil {
 		return s.Base.Runtime.LoadError(err)
 	}
 
+	w.Focus("endpoints", wool.Field("endpoints", configurations.MakeManyEndpointSummary(s.Endpoints)))
+
+	s.tcpEndpoint, err = configurations.FindTcpEndpoint(ctx, s.Endpoints)
+	if err != nil {
+		return s.Base.Runtime.LoadError(err)
+	}
 	return s.Base.Runtime.LoadResponse()
+}
+
+func (s *Runtime) getUserPassword(ctx context.Context) (string, string, error) {
+
+	user, err := configurations.GetConfigurationValue(ctx, s.Configuration, "postgres", "POSTGRES_USER")
+	if err != nil {
+		return "", "", s.Wool.Wrapf(err, "cannot get user")
+	}
+	password, err := configurations.GetConfigurationValue(ctx, s.Configuration, "postgres", "POSTGRES_PASSWORD")
+	if err != nil {
+		return "", "", s.Wool.Wrapf(err, "cannot get password")
+	}
+	return user, password, nil
+
+}
+
+func (s *Runtime) createConnectionString(ctx context.Context, address string, withSSL bool) (string, error) {
+	defer s.Wool.Catch()
+	ctx = s.Wool.Inject(ctx)
+
+	user, password, err := s.getUserPassword(ctx)
+	if err != nil {
+		return "", s.Wool.Wrapf(err, "cannot get user and password")
+	}
+
+	conn := fmt.Sprintf("postgresql://%s:%s@%s/%s", user, password, address, s.DatabaseName)
+	if !withSSL {
+		conn += "?sslmode=disable"
+	}
+	return conn, nil
+}
+
+func (s *Runtime) CreateConnectionConfiguration(ctx context.Context, instance *basev0.NetworkInstance, withSSL bool) (*basev0.Configuration, error) {
+	defer s.Wool.Catch()
+	ctx = s.Wool.Inject(ctx)
+	connection, err := s.createConnectionString(ctx, instance.Address, withSSL)
+	if err != nil {
+		return nil, s.Wool.Wrapf(err, "cannot create connection string")
+	}
+
+	conf := &basev0.Configuration{
+		Origin: s.Base.Service.Unique(),
+		Scope:  instance.Scope,
+		Configurations: []*basev0.ConfigurationInformation{
+			{Name: "postgres",
+				ConfigurationValues: []*basev0.ConfigurationValue{
+					{Key: "connection", Value: connection, Secret: true},
+				},
+			},
+		},
+	}
+	return conf, nil
 }
 
 func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtimev0.InitResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
+	w := s.Wool.In("init")
+
 	s.NetworkMappings = req.ProposedNetworkMappings
 
-	s.Wool.Focus("init",
-		wool.Field("info", configurations.MakeProviderInformationSummary(req.ProviderInfos)),
-		wool.Field("network mappings", configurations.MakeNetworkMappingSummary(s.NetworkMappings)))
+	w.Focus("network", wool.Field("endpoint", configurations.MakeEndpointSummary(s.tcpEndpoint)))
 
-	net, err := configurations.FindNetworkMapping(s.tcpEndpoint, s.NetworkMappings)
+	w.Focus("proposed network mapping", wool.Field("network", configurations.MakeManyNetworkMappingSummary(req.ProposedNetworkMappings)))
+
+	s.NetworkMappings = req.ProposedNetworkMappings
+
+	s.Configuration = req.Configuration
+
+	// Extract the port
+	net, err := configurations.FindNetworkMapping(s.NetworkMappings, s.tcpEndpoint)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	s.Focus("port", wool.Field("port", net.Port))
-	s.LogForward("will run on address: %s", net.Address)
-
-	// for docker version
-	s.port = 5432
-
-	for _, providerInfo := range req.ProviderInfos {
-		s.EnvironmentVariables.Add(configurations.ProviderInformationAsEnvironmentVariables(providerInfo)...)
-	}
-
-	err = s.CreateConnectionString(ctx, net.Address, true)
-
+	instance, err := s.Runtime.NetworkInstance(s.NetworkMappings, s.tcpEndpoint)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	s.Wool.Info("connection", wool.Field("connection", s.connection))
+	w.Focus("network instance", wool.Field("instance", instance))
 
-	// This is the credential exposed to dependencies
-	connectionString := &basev0.ProviderInformation{Name: "postgres", Origin: s.Service.Configuration.Unique(), Data: map[string]string{"connection": s.connection}}
+	s.LogForward("will run on localhost:%d", instance.Port)
+	s.postgresPort = 5432
 
-	s.ServiceProviderInfos = []*basev0.ProviderInformation{connectionString}
+	// Configurations
+	w.Focus("configurations",
+		wool.Field("service configuration", configurations.MakeConfigurationSummary(req.Configuration)),
+		wool.Field("dependency configurations", configurations.MakeManyConfigurationSummary(req.DependenciesConfigurations)))
+
+	// Create connection string configurations for the network instance
+	for _, inst := range net.Instances {
+		conf, err := s.CreateConnectionConfiguration(ctx, inst, false)
+		if err != nil {
+			return s.Runtime.InitError(err)
+		}
+		s.ExportedConfigurations = append(s.ExportedConfigurations, conf)
+	}
+
+	// Setup a connection string for migration
+	// We are inside the agent so we need to use the Native one!
+	hostInstance, err := configurations.FindNetworkInstance(s.NetworkMappings, s.tcpEndpoint, basev0.RuntimeScope_Native)
+	if err != nil {
+		return s.Runtime.InitError(err)
+
+	}
+	s.connection, err = s.createConnectionString(ctx, hostInstance.Address, false)
+	if err != nil {
+		return s.Runtime.InitError(err)
+	}
+	s.Wool.Focus("connection string", wool.Field("connection", s.connection))
 
 	// Docker
-	runner, err := runners.NewDocker(ctx)
+	runner, err := runners.NewDocker(ctx, runnerImage)
+	if err != nil {
+		return s.Runtime.InitError(err)
+	}
+	user, password, err := s.getUserPassword(ctx)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
 	s.runner = runner
 	if s.Settings.Persist {
-		s.runner.WithPersistence()
+		runner.WithPersistence()
 	}
-	s.runner.WithName(s.Global())
-	s.runner.WithOut(s.Wool)
-	s.runner.WithPort(runners.DockerPortMapping{Container: s.port, Host: net.Port})
-	s.runner.WithEnvironmentVariables(s.EnvironmentVariables.GetBase()...)
-	s.runner.WithEnvironmentVariables(fmt.Sprintf("POSTGRES_DB=%s", s.DatabaseName))
+	runner.WithName(s.Global())
+	runner.WithOut(s.Wool)
+	runner.WithPort(runners.DockerPortMapping{Container: s.postgresPort, Host: uint16(instance.Port)})
+
+	runner.WithEnvironmentVariables(
+		fmt.Sprintf("POSTGRES_USER=%s", user),
+		fmt.Sprintf("POSTGRES_PASSWORD=%s", password),
+		fmt.Sprintf("POSTGRES_DB=%s", s.DatabaseName))
 
 	if s.Settings.Silent {
-		s.runner.WithSilence()
+		runner.WithSilence()
 	}
 
-	err = s.runner.Init(ctx, runnerImage)
+	s.runner = runner
+
+	err = s.runner.Init(ctx)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}

@@ -5,14 +5,13 @@ import (
 	"embed"
 	"fmt"
 	dockerhelpers "github.com/codefly-dev/core/agents/helpers/docker"
-	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
+	"github.com/codefly-dev/core/configurations"
 	"github.com/codefly-dev/core/wool"
 
 	"github.com/codefly-dev/core/agents/communicate"
 	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
 
 	"github.com/codefly-dev/core/agents/services"
-	"github.com/codefly-dev/core/configurations"
 	builderv0 "github.com/codefly-dev/core/generated/go/services/builder/v0"
 	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/templates"
@@ -41,14 +40,19 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 	s.Wool.Focus("base loaded", wool.Field("identity", s.Identity))
 
 	requirements.Localize(s.Location)
+	//
+	//info := &basev0.ProviderInformation{
+	//	Name:   "postgres",
+	//	Origin: s.Configuration.Unique(),
+	//}
+	//s.connectionKey = configurations.ProviderInformationEnvKey(info, "connection")
 
-	info := &basev0.ProviderInformation{
-		Name:   "postgres",
-		Origin: s.Configuration.Unique(),
+	s.Endpoints, err = s.Builder.Service.LoadEndpoints(ctx)
+	if err != nil {
+		return s.Builder.LoadError(err)
 	}
-	s.connectionKey = configurations.ProviderInformationEnvKey(info, "connection")
 
-	err = s.LoadEndpoints(ctx)
+	s.tcpEndpoint, err = configurations.FindTcpEndpoint(ctx, s.Endpoints)
 	if err != nil {
 		return s.Builder.LoadError(err)
 	}
@@ -73,37 +77,37 @@ func (s *Builder) Init(ctx context.Context, req *builderv0.InitRequest) (*builde
 	defer s.Wool.Catch()
 
 	s.NetworkMappings = req.ProposedNetworkMappings
-
-	net, err := configurations.FindNetworkMapping(s.tcpEndpoint, s.NetworkMappings)
-	if err != nil {
-		return nil, s.Wool.Wrapf(err, "cannot get network mappings")
-	}
+	//
+	//net, err := configurations.FindNetworkMapping(s.tcpEndpoint, s.NetworkMappings)
+	//if err != nil {
+	//	return nil, s.Wool.Wrapf(err, "cannot get network mappings")
+	//}
 
 	s.DependencyEndpoints = req.DependenciesEndpoints
 
-	// Load credentials
-	info, err := configurations.FindServiceProvider(s.Configuration.Unique(), "postgres", req.ProviderInfos)
-	if err != nil {
-		return s.Builder.InitError(err)
-	}
-
-	s.EnvironmentVariables.Add(configurations.ProviderInformationAsEnvironmentVariables(info)...)
-
-	// Create a connection string
-	err = s.CreateConnectionString(ctx, net.Address, s.Settings.WithoutSSL)
-
-	s.Wool.Focus("init", wool.Field("provider", info.Data))
-
-	// This is the credential exposed to dependencies
-	s.ServiceProviderInfos = []*basev0.ProviderInformation{
-		{Name: "postgres",
-			Origin: s.Service.Configuration.Unique(),
-			Data:   map[string]string{"connection": s.connection},
-		},
-	}
-	s.Wool.Focus("writing", wool.Field("key", s.connectionKey), wool.Field("connection", s.connection))
-
-	s.EnvironmentVariables.Add(fmt.Sprintf("%s=%s", s.connectionKey, s.connection))
+	//// Load credentials
+	//info, err := configurations.FindServiceProvider(s.Configuration.Unique(), "postgres", req.ProviderInfos)
+	//if err != nil {
+	//	return s.Builder.InitError(err)
+	//}
+	//
+	//s.EnvironmentVariables.Add(configurations.ProviderInformationAsEnvironmentVariables(info)...)
+	//
+	//// Create a connection string
+	//err = s.CreateConnectionString(ctx, net.Address, s.Settings.WithoutSSL)
+	//
+	//s.Wool.Focus("init", wool.Field("provider", info.Data))
+	////
+	////// This is the credential exposed to dependencies
+	////s.ServiceProviderInfos = []*basev0.ProviderInformation{
+	////	{Name: "postgres",
+	////		Origin: s.Service.Configuration.Unique(),
+	////		Data:   map[string]string{"connection": s.connection},
+	////	},
+	////}
+	//s.Wool.Focus("writing", wool.Field("key", s.connectionKey), wool.Field("connection", s.connection))
+	//
+	//s.EnvironmentVariables.Add(fmt.Sprintf("%s=%s", s.connectionKey, s.connection))
 
 	return s.Builder.InitResponse()
 }
@@ -198,7 +202,7 @@ const DatabaseName = "database-name"
 func (s *Builder) createCommunicate() *communicate.Sequence {
 	return communicate.NewSequence(
 		communicate.NewConfirm(&agentv0.Message{Name: Watch, Message: "Migration hot-reload (Recommended)?", Description: "codefly can restart your database when migration changes detected 🔎"}, true),
-		communicate.NewStringInput(&agentv0.Message{Name: DatabaseName, Message: "Name of the database?", Description: "Ensure encapsulation of your data"}, s.Configuration.Application),
+		communicate.NewStringInput(&agentv0.Message{Name: DatabaseName, Message: "Name of the database?", Description: "Ensure encapsulation of your data"}, s.Builder.Service.Application),
 	)
 }
 
@@ -224,7 +228,7 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 		return nil, s.Wool.Wrapf(err, "cannot create endpoints")
 	}
 
-	c := create{DatabaseName: s.Settings.DatabaseName, TableName: s.Configuration.Name}
+	c := create{DatabaseName: s.Settings.DatabaseName, TableName: s.Builder.Service.Name}
 	err = s.Templates(ctx, c, services.WithFactory(factoryFS))
 	if err != nil {
 		return s.Base.Builder.CreateError(err)

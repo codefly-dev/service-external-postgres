@@ -3,9 +3,6 @@ package main
 import (
 	"context"
 	"embed"
-	"fmt"
-	"github.com/codefly-dev/core/configurations/standards"
-
 	"github.com/codefly-dev/core/builders"
 	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
 	"github.com/codefly-dev/core/templates"
@@ -60,19 +57,19 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 	}
 
 	return &agentv0.AgentInformation{
-		RuntimeRequirements: []*agentv0.Runtime{
-			{Type: agentv0.Runtime_DOCKER},
-		},
+		RuntimeRequirements: []*agentv0.Runtime{},
 		Capabilities: []*agentv0.Capability{
 			{Type: agentv0.Capability_BUILDER},
 			{Type: agentv0.Capability_RUNTIME},
 		},
 		Protocols: []*agentv0.Protocol{},
-		ProviderInfos: []*agentv0.ProviderInfoDetail{
+		ConfigurationDetails: []*agentv0.ConfigurationValueDetail{
 			{
 				Name: "postgres", Description: "postgres credentials",
-				Fields: []*agentv0.ProviderInfoField{
-					{Name: "connection", Description: "connection string"},
+				Fields: []*agentv0.ConfigurationValueInformation{
+					{
+						Name: "connection", Description: "connection string",
+					},
 				}},
 		},
 		ReadMe: readme,
@@ -86,40 +83,20 @@ func NewService() *Service {
 	}
 }
 
-func (s *Service) LoadEndpoints(ctx context.Context) error {
-	defer s.Wool.Catch()
-	s.Endpoints = []*basev0.Endpoint{}
-	var err error
-	for _, endpoint := range s.Configuration.Endpoints {
-		endpoint.Application = s.Configuration.Application
-		endpoint.Service = s.Configuration.Name
-		switch endpoint.API {
-		case standards.TCP:
-			s.tcpEndpoint, err = configurations.NewTCPAPI(ctx, endpoint)
-			if err != nil {
-				return s.Wool.Wrapf(err, "cannot create tcp api")
-			}
-			s.Endpoints = append(s.Endpoints, s.tcpEndpoint)
-			continue
-		}
-	}
-	return nil
-}
-
 func (s *Service) CreateConnectionString(ctx context.Context, address string, withoutSSL bool) error {
-	user, err := s.EnvironmentVariables.GetServiceProvider(ctx, s.Unique(), "postgres", "POSTGRES_USER")
-	if err != nil {
-		return s.Wool.Wrapf(err, "cannot get user")
-	}
-	password, err := s.EnvironmentVariables.GetServiceProvider(ctx, s.Unique(), "postgres", "POSTGRES_PASSWORD")
-	if err != nil {
-		return s.Wool.Wrapf(err, "cannot get password")
-	}
-	connection := fmt.Sprintf("postgresql://%s:%s@%s/%s", user, password, address, s.DatabaseName)
-	if withoutSSL {
-		connection += "?sslmode=disable"
-	}
-	s.connection = connection
+	//user, err := s.EnvironmentVariables.GetServiceProvider(ctx, s.Unique(), "postgres", "POSTGRES_USER")
+	//if err != nil {
+	//	return s.Wool.Wrapf(err, "cannot get user")
+	//}
+	//password, err := s.EnvironmentVariables.GetServiceProvider(ctx, s.Unique(), "postgres", "POSTGRES_PASSWORD")
+	//if err != nil {
+	//	return s.Wool.Wrapf(err, "cannot get password")
+	//}
+	//connection := fmt.Sprintf("postgresql://%s:%s@%s/%s", user, password, address, s.DatabaseName)
+	//if withoutSSL {
+	//	connection += "?sslmode=disable"
+	//}
+	//s.connection = connection
 	return nil
 }
 
