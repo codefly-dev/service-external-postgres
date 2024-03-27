@@ -52,7 +52,7 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 		return s.Builder.LoadError(err)
 	}
 
-	s.tcpEndpoint, err = configurations.FindTcpEndpoint(ctx, s.Endpoints)
+	s.tcpEndpoint, err = configurations.FindTCPEndpoint(ctx, s.Endpoints)
 	if err != nil {
 		return s.Builder.LoadError(err)
 	}
@@ -172,27 +172,27 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
-
-	// Only expose the "connection"
-	connectionEnv, err := s.EnvironmentVariables.Find(ctx, s.connectionKey)
-	if err != nil {
-		return s.Builder.DeployError(s.Errorf("cannot find connection string"))
-	}
-	s.Wool.Focus("connection", wool.Field("env", connectionEnv))
-
-	secret, err := services.EnvsAsSecretData(connectionEnv)
-	if err != nil {
-		return s.Builder.DeployError(err)
-	}
-
-	params := services.DeploymentParameters{
-		SecretMap: secret,
-	}
-
-	err = s.Builder.GenericServiceDeploy(ctx, req, deploymentFS, params)
-	if err != nil {
-		return s.Builder.DeployError(err)
-	}
+	//
+	//// Only expose the "connection"
+	//connectionEnv, err := s.EnvironmentVariables.Find(ctx, s.connectionKey)
+	//if err != nil {
+	//	return s.Builder.DeployError(s.Errorf("cannot find connection string"))
+	//}
+	//s.Wool.Focus("connection", wool.Field("env", connectionEnv))
+	//
+	//secret, err := services.EnvsAsSecretData(connectionEnv)
+	//if err != nil {
+	//	return s.Builder.DeployError(err)
+	//}
+	//
+	//params := services.DeploymentParameters{
+	//	SecretMap: secret,
+	//}
+	//
+	//err = s.Builder.GenericServiceDeploy(ctx, req, deploymentFS, params)
+	//if err != nil {
+	//	return s.Builder.DeployError(err)
+	//}
 	return s.Builder.DeployResponse()
 }
 

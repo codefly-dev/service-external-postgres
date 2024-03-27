@@ -65,7 +65,7 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 
 	w.Focus("endpoints", wool.Field("endpoints", configurations.MakeManyEndpointSummary(s.Endpoints)))
 
-	s.tcpEndpoint, err = configurations.FindTcpEndpoint(ctx, s.Endpoints)
+	s.tcpEndpoint, err = configurations.FindTCPEndpoint(ctx, s.Endpoints)
 	if err != nil {
 		return s.Base.Runtime.LoadError(err)
 	}
