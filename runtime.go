@@ -40,7 +40,8 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	if s.Runtime.Scope != basev0.RuntimeScope_Container {
+	s.Runtime.SetScope(req)
+	if !s.Runtime.Container() {
 		return s.Base.Runtime.LoadError(fmt.Errorf("not implemented: cannot load service in scope %s", req.Scope))
 	}
 
@@ -68,58 +69,6 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 	return s.Base.Runtime.LoadResponse()
 }
 
-func (s *Runtime) getUserPassword(ctx context.Context) (string, string, error) {
-
-	user, err := configurations.GetConfigurationValue(ctx, s.Configuration, "postgres", "POSTGRES_USER")
-	if err != nil {
-		return "", "", s.Wool.Wrapf(err, "cannot get user")
-	}
-	password, err := configurations.GetConfigurationValue(ctx, s.Configuration, "postgres", "POSTGRES_PASSWORD")
-	if err != nil {
-		return "", "", s.Wool.Wrapf(err, "cannot get password")
-	}
-	return user, password, nil
-
-}
-
-func (s *Runtime) createConnectionString(ctx context.Context, address string, withSSL bool) (string, error) {
-	defer s.Wool.Catch()
-	ctx = s.Wool.Inject(ctx)
-
-	user, password, err := s.getUserPassword(ctx)
-	if err != nil {
-		return "", s.Wool.Wrapf(err, "cannot get user and password")
-	}
-
-	conn := fmt.Sprintf("postgresql://%s:%s@%s/%s", user, password, address, s.DatabaseName)
-	if !withSSL {
-		conn += "?sslmode=disable"
-	}
-	return conn, nil
-}
-
-func (s *Runtime) CreateConnectionConfiguration(ctx context.Context, instance *basev0.NetworkInstance, withSSL bool) (*basev0.Configuration, error) {
-	defer s.Wool.Catch()
-	ctx = s.Wool.Inject(ctx)
-	connection, err := s.createConnectionString(ctx, instance.Address, withSSL)
-	if err != nil {
-		return nil, s.Wool.Wrapf(err, "cannot create connection string")
-	}
-
-	conf := &basev0.Configuration{
-		Origin: s.Base.Service.Unique(),
-		Scope:  instance.Scope,
-		Configurations: []*basev0.ConfigurationInformation{
-			{Name: "postgres",
-				ConfigurationValues: []*basev0.ConfigurationValue{
-					{Key: "connection", Value: connection, Secret: true},
-				},
-			},
-		},
-	}
-	return conf, nil
-}
-
 func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtimev0.InitResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
@@ -134,7 +83,6 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.Configuration = req.Configuration
 
-	// Extract the port
 	net, err := configurations.FindNetworkMapping(s.NetworkMappings, s.tcpEndpoint)
 	if err != nil {
 		return s.Runtime.InitError(err)

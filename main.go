@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"fmt"
 	"github.com/codefly-dev/core/builders"
 	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
 	"github.com/codefly-dev/core/templates"
@@ -84,22 +85,56 @@ func NewService() *Service {
 		Settings: &Settings{},
 	}
 }
+func (s *Service) getUserPassword(ctx context.Context) (string, string, error) {
 
-func (s *Service) CreateConnectionString(ctx context.Context, address string, withoutSSL bool) error {
-	//user, err := s.EnvironmentVariables.GetServiceProvider(ctx, s.Unique(), "postgres", "POSTGRES_USER")
-	//if err != nil {
-	//	return s.Wool.Wrapf(err, "cannot get user")
-	//}
-	//password, err := s.EnvironmentVariables.GetServiceProvider(ctx, s.Unique(), "postgres", "POSTGRES_PASSWORD")
-	//if err != nil {
-	//	return s.Wool.Wrapf(err, "cannot get password")
-	//}
-	//connection := fmt.Sprintf("postgresql://%s:%s@%s/%s", user, password, address, s.DatabaseName)
-	//if withoutSSL {
-	//	connection += "?sslmode=disable"
-	//}
-	//s.connection = connection
-	return nil
+	user, err := configurations.GetConfigurationValue(ctx, s.Configuration, "postgres", "POSTGRES_USER")
+	if err != nil {
+		return "", "", s.Wool.Wrapf(err, "cannot get user")
+	}
+	password, err := configurations.GetConfigurationValue(ctx, s.Configuration, "postgres", "POSTGRES_PASSWORD")
+	if err != nil {
+		return "", "", s.Wool.Wrapf(err, "cannot get password")
+	}
+	return user, password, nil
+
+}
+
+func (s *Service) createConnectionString(ctx context.Context, address string, withSSL bool) (string, error) {
+	defer s.Wool.Catch()
+	ctx = s.Wool.Inject(ctx)
+
+	user, password, err := s.getUserPassword(ctx)
+	if err != nil {
+		return "", s.Wool.Wrapf(err, "cannot get user and password")
+	}
+
+	conn := fmt.Sprintf("postgresql://%s:%s@%s/%s", user, password, address, s.DatabaseName)
+	if !withSSL {
+		conn += "?sslmode=disable"
+	}
+	return conn, nil
+}
+
+func (s *Service) CreateConnectionConfiguration(ctx context.Context, instance *basev0.NetworkInstance, withSSL bool) (*basev0.Configuration, error) {
+	defer s.Wool.Catch()
+	ctx = s.Wool.Inject(ctx)
+	connection, err := s.createConnectionString(ctx, instance.Address, withSSL)
+	if err != nil {
+		return nil, s.Wool.Wrapf(err, "cannot create connection string")
+	}
+
+	conf := &basev0.Configuration{
+		Origin: s.Base.Service.Unique(),
+		Scope:  instance.Scope,
+		Configurations: []*basev0.ConfigurationInformation{
+			{Name: "postgres",
+				ConfigurationValues: []*basev0.ConfigurationValue{
+					{Key: "connection", Value: connection, Secret: true},
+				},
+			},
+		},
+	}
+	return conf, nil
 }
 
 func main() {

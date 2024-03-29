@@ -37,15 +37,11 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 		return nil, err
 	}
 
+	s.EnvironmentVariables.SetEnvironment(s.Environment)
+
 	s.Wool.Focus("base loaded", wool.Field("identity", s.Identity))
 
 	requirements.Localize(s.Location)
-	//
-	//info := &basev0.ProviderInformation{
-	//	Name:   "postgres",
-	//	Origin: s.Configuration.Unique(),
-	//}
-	//s.connectionKey = configurations.ProviderInformationEnvKey(info, "connection")
 
 	s.Endpoints, err = s.Builder.Service.LoadEndpoints(ctx)
 	if err != nil {
@@ -77,37 +73,22 @@ func (s *Builder) Init(ctx context.Context, req *builderv0.InitRequest) (*builde
 	defer s.Wool.Catch()
 
 	s.NetworkMappings = req.ProposedNetworkMappings
-	//
-	//net, err := configurations.FindNetworkMapping(s.tcpEndpoint, s.NetworkMappings)
-	//if err != nil {
-	//	return nil, s.Wool.Wrapf(err, "cannot get network mappings")
-	//}
 
-	s.DependencyEndpoints = req.DependenciesEndpoints
+	instance, err := s.Runtime.NetworkInstance(s.NetworkMappings, s.tcpEndpoint)
+	if err != nil {
+		return s.Builder.InitError(err)
+	}
 
-	//// Load credentials
-	//info, err := configurations.FindServiceProvider(s.Configuration.Unique(), "postgres", req.ProviderInfos)
-	//if err != nil {
-	//	return s.Builder.InitError(err)
-	//}
-	//
-	//s.EnvironmentVariables.Add(configurations.ProviderInformationAsEnvironmentVariables(info)...)
-	//
-	//// Create a connection string
-	//err = s.CreateConnectionConfiguration(ctx, net.Address, s.Settings.WithoutSSL)
-	//
-	//s.Wool.Focus("init", wool.Field("provider", info.Data))
-	////
-	////// This is the credential exposed to dependencies
-	////s.ServiceProviderInfos = []*basev0.ProviderInformation{
-	////	{Name: "postgres",
-	////		Origin: s.Service.Configuration.Unique(),
-	////		Data:   map[string]string{"connection": s.connection},
-	////	},
-	////}
-	//s.Wool.Focus("writing", wool.Field("key", s.connectionKey), wool.Field("connection", s.connection))
-	//
-	//s.EnvironmentVariables.Add(fmt.Sprintf("%s=%s", s.connectionKey, s.connection))
+	s.Wool.Focus("network instance", wool.Field("instance", instance))
+
+	s.LogForward("will run on localhost:%d", instance.Port)
+
+	conf, err := s.CreateConnectionConfiguration(ctx, instance, !s.Settings.WithoutSSL)
+	if err != nil {
+		return s.Builder.InitError(err)
+	}
+	s.Configuration = conf
+	s.ExportedConfigurations = append(s.ExportedConfigurations, conf)
 
 	return s.Builder.InitResponse()
 }
@@ -142,7 +123,8 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 		return s.Builder.BuildError(fmt.Errorf("invalid docker runnerImage name: %s", image.Name))
 	}
 
-	docker := DockerTemplating{ConnectionStringKeyHolder: fmt.Sprintf("${%s}", s.connectionKey)}
+	connectionKey := configurations.SecretKey(s.Base.Service, "postgres", "connection")
+	docker := DockerTemplating{ConnectionStringKeyHolder: fmt.Sprintf("${%s}", connectionKey)}
 
 	err := shared.DeleteFile(ctx, s.Local("builder/Dockerfile"))
 	if err != nil {
@@ -172,27 +154,29 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
-	//
-	//// Only expose the "connection"
-	//connectionEnv, err := s.EnvironmentVariables.Find(ctx, s.connectionKey)
-	//if err != nil {
-	//	return s.Builder.DeployError(s.Errorf("cannot find connection string"))
-	//}
-	//s.Wool.Focus("connection", wool.Field("env", connectionEnv))
-	//
-	//secret, err := services.EnvsAsSecretData(connectionEnv)
-	//if err != nil {
-	//	return s.Builder.DeployError(err)
-	//}
-	//
-	//params := services.DeploymentParameters{
-	//	SecretMap: secret,
-	//}
-	//
-	//err = s.Builder.GenericServiceDeploy(ctx, req, deploymentFS, params)
-	//if err != nil {
-	//	return s.Builder.DeployError(err)
-	//}
+
+	s.Builder.LogDeployRequest(req)
+
+	cm, err := services.EnvsAsConfigMapData(s.EnvironmentVariables.Configurations()...)
+	if err != nil {
+		return s.Builder.DeployError(err)
+	}
+
+	secrets, err := services.EnvsAsSecretData(s.EnvironmentVariables.Secrets()...)
+	if err != nil {
+		return s.Builder.DeployError(err)
+	}
+
+	params := services.DeploymentParameters{
+		ConfigMap: cm,
+		SecretMap: secrets,
+	}
+
+	err = s.Builder.GenericServiceDeploy(ctx, req, deploymentFS, params)
+	if err != nil {
+		return s.Builder.DeployError(err)
+	}
+
 	return s.Builder.DeployResponse()
 }
 
