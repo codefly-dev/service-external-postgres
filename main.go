@@ -86,7 +86,6 @@ func NewService() *Service {
 	}
 }
 func (s *Service) getUserPassword(ctx context.Context) (string, string, error) {
-
 	user, err := configurations.GetConfigurationValue(ctx, s.Configuration, "postgres", "POSTGRES_USER")
 	if err != nil {
 		return "", "", s.Wool.Wrapf(err, "cannot get user")

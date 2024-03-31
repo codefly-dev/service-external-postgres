@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/codefly-dev/core/wool"
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	"net/url"
@@ -27,7 +28,8 @@ func (s *Runtime) applyMigration(ctx context.Context) error {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	maxRetry := 30
+	s.Wool.Debug("migrations", wool.Field("connection", s.connection))
+	maxRetry := 3
 	for retry := 0; retry < maxRetry; retry++ {
 		db, err := sql.Open("postgres", s.connection)
 		if err != nil {
@@ -35,7 +37,7 @@ func (s *Runtime) applyMigration(ctx context.Context) error {
 		}
 		driver, err := postgres.WithInstance(db, &postgres.Config{DatabaseName: s.Settings.DatabaseName})
 		if err != nil {
-			time.Sleep(3 * time.Second)
+			time.Sleep(time.Second)
 			continue
 		}
 

@@ -10,4 +10,4 @@ COPY . .
 
 COPY migrations /app/migrations
 
-CMD /usr/local/bin/migrate -path /app/migrations -database "{{.ConnectionStringKeyHolder}}" up
+CMD /usr/local/bin/migrate -path /app/migrations -database "${{.ConnectionStringKeyHolder}}" up

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	dockerhelpers "github.com/codefly-dev/core/agents/helpers/docker"
 	"github.com/codefly-dev/core/configurations"
+	v0 "github.com/codefly-dev/core/generated/go/base/v0"
 	"github.com/codefly-dev/core/wool"
 
 	"github.com/codefly-dev/core/agents/communicate"
@@ -39,7 +40,7 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 
 	s.EnvironmentVariables.SetEnvironment(s.Environment)
 
-	s.Wool.Focus("base loaded", wool.Field("identity", s.Identity))
+	s.Wool.Debug("base loaded", wool.Field("identity", s.Identity))
 
 	requirements.Localize(s.Location)
 
@@ -53,7 +54,7 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 		return s.Builder.LoadError(err)
 	}
 
-	s.Wool.Focus("endpoint", wool.Field("tcp", s.tcpEndpoint))
+	s.Wool.Debug("endpoint", wool.Field("tcp", s.tcpEndpoint))
 
 	gettingStarted, err := templates.ApplyTemplateFrom(ctx, shared.Embed(factoryFS), "templates/factory/GETTING_STARTED.md", s.Information)
 	if err != nil {
@@ -71,24 +72,6 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 
 func (s *Builder) Init(ctx context.Context, req *builderv0.InitRequest) (*builderv0.InitResponse, error) {
 	defer s.Wool.Catch()
-
-	s.NetworkMappings = req.ProposedNetworkMappings
-
-	instance, err := s.Runtime.NetworkInstance(s.NetworkMappings, s.tcpEndpoint)
-	if err != nil {
-		return s.Builder.InitError(err)
-	}
-
-	s.Wool.Focus("network instance", wool.Field("instance", instance))
-
-	s.LogForward("will run on localhost:%d", instance.Port)
-
-	conf, err := s.CreateConnectionConfiguration(ctx, instance, !s.Settings.WithoutSSL)
-	if err != nil {
-		return s.Builder.InitError(err)
-	}
-	s.Configuration = conf
-	s.ExportedConfigurations = append(s.ExportedConfigurations, conf)
 
 	return s.Builder.InitResponse()
 }
@@ -123,7 +106,7 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 		return s.Builder.BuildError(fmt.Errorf("invalid docker runnerImage name: %s", image.Name))
 	}
 
-	connectionKey := configurations.SecretKey(s.Base.Service, "postgres", "connection")
+	connectionKey := configurations.ServiceSecretConfigurationKey(s.Base.Service, "postgres", "connection")
 	docker := DockerTemplating{ConnectionStringKeyHolder: fmt.Sprintf("${%s}", connectionKey)}
 
 	err := shared.DeleteFile(ctx, s.Local("builder/Dockerfile"))
@@ -155,7 +138,32 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
 
-	s.Builder.LogDeployRequest(req)
+	s.Builder.LogDeployRequest(req, s.Wool.Debug)
+
+	s.EnvironmentVariables.SetRunning(true)
+
+	instance, err := configurations.FindNetworkInstance(ctx, req.NetworkMappings, s.tcpEndpoint, v0.NetworkScope_External)
+	if err != nil {
+		return s.Builder.DeployError(err)
+	}
+
+	s.Wool.Debug("network instance", wool.Field("instance", instance))
+
+	s.LogForward("will run on localhost:%d", instance.Port)
+
+	s.Configuration = req.Configuration
+
+	conf, err := s.CreateConnectionConfiguration(ctx, instance, !s.Settings.WithoutSSL)
+	if err != nil {
+		return s.Builder.DeployError(err)
+	}
+
+	err = s.EnvironmentVariables.AddConfigurations(conf)
+	if err != nil {
+		return s.Builder.DeployError(err)
+	}
+
+	s.Configuration = conf
 
 	cm, err := services.EnvsAsConfigMapData(s.EnvironmentVariables.Configurations()...)
 	if err != nil {
@@ -216,6 +224,13 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 	err = s.Templates(ctx, c, services.WithFactory(factoryFS))
 	if err != nil {
 		return s.Base.Builder.CreateError(err)
+	}
+
+	s.Endpoints = []*v0.Endpoint{
+		{
+			Name:       "tcp",
+			Visibility: configurations.VisibilityExternal,
+		},
 	}
 
 	return s.Base.Builder.CreateResponse(ctx, s.Settings)

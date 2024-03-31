@@ -41,11 +41,10 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 	ctx = s.Wool.Inject(ctx)
 
 	s.Runtime.SetScope(req)
+
 	if !s.Runtime.Container() {
 		return s.Base.Runtime.LoadError(fmt.Errorf("not implemented: cannot load service in scope %s", req.Scope))
 	}
-
-	s.Runtime.Scope = req.Scope
 
 	err := s.Base.Load(ctx, req.Identity, s.Settings)
 	if err != nil {
@@ -60,7 +59,7 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 		return s.Base.Runtime.LoadError(err)
 	}
 
-	s.Wool.Focus("endpoints", wool.Field("endpoints", configurations.MakeManyEndpointSummary(s.Endpoints)))
+	s.Wool.Debug("endpoints", wool.Field("endpoints", configurations.MakeManyEndpointSummary(s.Endpoints)))
 
 	s.tcpEndpoint, err = configurations.FindTCPEndpoint(ctx, s.Endpoints)
 	if err != nil {
@@ -79,21 +78,19 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.NetworkMappings = req.ProposedNetworkMappings
 
-	s.NetworkMappings = req.ProposedNetworkMappings
-
 	s.Configuration = req.Configuration
 
-	net, err := configurations.FindNetworkMapping(s.NetworkMappings, s.tcpEndpoint)
+	net, err := configurations.FindNetworkMapping(ctx, s.NetworkMappings, s.tcpEndpoint)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	instance, err := s.Runtime.NetworkInstance(s.NetworkMappings, s.tcpEndpoint)
+	instance, err := s.Runtime.NetworkInstance(ctx, s.NetworkMappings, s.tcpEndpoint)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	w.Focus("network instance", wool.Field("instance", instance))
+	w.Debug("network instance", wool.Field("instance", instance))
 
 	s.LogForward("will run on localhost:%d", instance.Port)
 	s.postgresPort = 5432
@@ -104,12 +101,12 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		if err != nil {
 			return s.Runtime.InitError(err)
 		}
-		s.ExportedConfigurations = append(s.ExportedConfigurations, conf)
+		s.Runtime.ExportedConfigurations = append(s.Runtime.ExportedConfigurations, conf)
 	}
 
 	// Setup a connection string for migration
 	// We are inside the agent so we need to use the Native one!
-	hostInstance, err := configurations.FindNetworkInstance(s.NetworkMappings, s.tcpEndpoint, basev0.RuntimeScope_Native)
+	hostInstance, err := configurations.FindNetworkInstance(ctx, s.NetworkMappings, s.tcpEndpoint, basev0.NetworkScope_Native)
 	if err != nil {
 		return s.Runtime.InitError(err)
 
@@ -118,7 +115,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
-	s.Wool.Focus("connection string", wool.Field("connection", s.connection))
+	s.Wool.Debug("connection string", wool.Field("connection", s.connection))
 
 	// Docker
 	runner, err := runners.NewDocker(ctx, runnerImage)
@@ -161,9 +158,9 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	s.Wool.Focus("waiting for ready", wool.Field("connection", s.connection))
+	s.Wool.Debug("waiting for ready", wool.Field("connection", s.connection))
 
-	maxRetry := 20
+	maxRetry := 10
 	var err error
 	for retry := 0; retry < maxRetry; retry++ {
 		db, err := sql.Open("postgres", s.connection)
@@ -176,11 +173,12 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 			// Try to execute a simple query
 			_, err = db.Exec("SELECT 1")
 			if err == nil {
+				s.Wool.Debug("database ready!")
 				return nil
 			}
 		}
 		s.Wool.Debug("waiting for database", wool.ErrField(err))
-		time.Sleep(3 * time.Second)
+		time.Sleep(time.Second)
 	}
 	return s.Wool.Wrapf(err, "cannot ping database")
 }
