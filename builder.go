@@ -132,6 +132,9 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	if err != nil {
 		return s.Builder.BuildError(err)
 	}
+
+	s.Builder.WithDockerImages(image)
+
 	return s.Builder.BuildResponse()
 }
 
