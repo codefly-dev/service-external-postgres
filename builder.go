@@ -100,7 +100,12 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 
 	ctx = s.Wool.Inject(ctx)
 
-	image := s.DockerImage(req.BuildContext)
+	dockerRequest, err := s.Builder.DockerBuildRequest(ctx, req)
+	if err != nil {
+		return nil, s.Wool.Wrapf(err, "can only do docker build request")
+	}
+
+	image := s.DockerImage(dockerRequest)
 
 	if !dockerhelpers.IsValidDockerImageName(image.Name) {
 		return s.Builder.BuildError(fmt.Errorf("invalid docker runnerImage name: %s", image.Name))
@@ -109,7 +114,7 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	connectionKey := configurations.ServiceSecretConfigurationKey(s.Base.Service, "postgres", "connection")
 	docker := DockerTemplating{ConnectionStringKeyHolder: fmt.Sprintf("${%s}", connectionKey)}
 
-	err := shared.DeleteFile(ctx, s.Local("builder/Dockerfile"))
+	err = shared.DeleteFile(ctx, s.Local("builder/Dockerfile"))
 	if err != nil {
 		return s.Builder.BuildError(err)
 	}
@@ -182,12 +187,14 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 		ConfigMap: cm,
 		SecretMap: secrets,
 	}
-
-	err = s.Builder.GenericServiceDeploy(ctx, req, deploymentFS, params)
+	var k *builderv0.KubernetesDeployment
+	if k, err = s.Builder.KubernetesDeploymentRequest(ctx, req); err != nil {
+		return s.Builder.DeployError(err)
+	}
+	err = s.Builder.KustomizeDeploy(ctx, req.Environment, k, deploymentFS, params)
 	if err != nil {
 		return s.Builder.DeployError(err)
 	}
-
 	return s.Builder.DeployResponse()
 }
 
