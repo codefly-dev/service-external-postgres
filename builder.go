@@ -38,8 +38,6 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 		return nil, err
 	}
 
-	s.EnvironmentVariables.SetEnvironment(s.Environment)
-
 	s.Wool.Debug("base loaded", wool.Field("identity", s.Identity))
 
 	requirements.Localize(s.Location)
@@ -112,7 +110,7 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	}
 
 	connectionKey := configurations.ServiceSecretConfigurationKey(s.Base.Service, "postgres", "connection")
-	docker := DockerTemplating{ConnectionStringKeyHolder: fmt.Sprintf("${%s}", connectionKey)}
+	docker := DockerTemplating{ConnectionStringKeyHolder: fmt.Sprintf("{%s}", connectionKey)}
 
 	err = shared.DeleteFile(ctx, s.Local("builder/Dockerfile"))
 	if err != nil {
@@ -155,13 +153,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 		return s.Builder.DeployError(err)
 	}
 
-	s.Wool.Debug("network instance", wool.Field("instance", instance))
-
-	s.LogForward("will run on localhost:%d", instance.Port)
-
-	s.Configuration = req.Configuration
-
-	conf, err := s.CreateConnectionConfiguration(ctx, instance, !s.Settings.WithoutSSL)
+	conf, err := s.CreateConnectionConfiguration(ctx, req.Configuration, instance, !s.Settings.WithoutSSL)
 	if err != nil {
 		return s.Builder.DeployError(err)
 	}

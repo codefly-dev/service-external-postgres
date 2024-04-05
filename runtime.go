@@ -102,7 +102,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	// Create connection string configurations for the network instance
 	for _, inst := range net.Instances {
-		conf, err := s.CreateConnectionConfiguration(ctx, inst, false)
+		conf, err := s.CreateConnectionConfiguration(ctx, req.Configuration, inst, false)
 		if err != nil {
 			return s.Runtime.InitError(err)
 		}
@@ -116,7 +116,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(err)
 
 	}
-	s.connection, err = s.createConnectionString(ctx, hostInstance.Address, false)
+	s.connection, err = s.createConnectionString(ctx, req.Configuration, hostInstance.Address, false)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
@@ -127,7 +127,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
-	user, password, err := s.getUserPassword(ctx)
+	user, password, err := s.getUserPassword(ctx, req.Configuration)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}

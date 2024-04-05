@@ -85,12 +85,12 @@ func NewService() *Service {
 		Settings: &Settings{},
 	}
 }
-func (s *Service) getUserPassword(ctx context.Context) (string, string, error) {
-	user, err := configurations.GetConfigurationValue(ctx, s.Configuration, "postgres", "POSTGRES_USER")
+func (s *Service) getUserPassword(ctx context.Context, conf *basev0.Configuration) (string, string, error) {
+	user, err := configurations.GetConfigurationValue(ctx, conf, "postgres", "POSTGRES_USER")
 	if err != nil {
 		return "", "", s.Wool.Wrapf(err, "cannot get user")
 	}
-	password, err := configurations.GetConfigurationValue(ctx, s.Configuration, "postgres", "POSTGRES_PASSWORD")
+	password, err := configurations.GetConfigurationValue(ctx, conf, "postgres", "POSTGRES_PASSWORD")
 	if err != nil {
 		return "", "", s.Wool.Wrapf(err, "cannot get password")
 	}
@@ -98,11 +98,11 @@ func (s *Service) getUserPassword(ctx context.Context) (string, string, error) {
 
 }
 
-func (s *Service) createConnectionString(ctx context.Context, address string, withSSL bool) (string, error) {
+func (s *Service) createConnectionString(ctx context.Context, conf *basev0.Configuration, address string, withSSL bool) (string, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	user, password, err := s.getUserPassword(ctx)
+	user, password, err := s.getUserPassword(ctx, conf)
 	if err != nil {
 		return "", s.Wool.Wrapf(err, "cannot get user and password")
 	}
@@ -114,15 +114,15 @@ func (s *Service) createConnectionString(ctx context.Context, address string, wi
 	return conn, nil
 }
 
-func (s *Service) CreateConnectionConfiguration(ctx context.Context, instance *basev0.NetworkInstance, withSSL bool) (*basev0.Configuration, error) {
+func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev0.Configuration, instance *basev0.NetworkInstance, withSSL bool) (*basev0.Configuration, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
-	connection, err := s.createConnectionString(ctx, instance.Address, withSSL)
+	connection, err := s.createConnectionString(ctx, conf, instance.Address, withSSL)
 	if err != nil {
 		return nil, s.Wool.Wrapf(err, "cannot create connection string")
 	}
 
-	conf := &basev0.Configuration{
+	outputConf := &basev0.Configuration{
 		Origin: s.Base.Service.Unique(),
 		Scope:  instance.Scope,
 		Configurations: []*basev0.ConfigurationInformation{
@@ -133,7 +133,7 @@ func (s *Service) CreateConnectionConfiguration(ctx context.Context, instance *b
 			},
 		},
 	}
-	return conf, nil
+	return outputConf, nil
 }
 
 func main() {
