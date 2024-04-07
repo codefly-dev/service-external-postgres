@@ -10,6 +10,7 @@ import (
 	"github.com/codefly-dev/core/wool"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"strings"
 
 	"github.com/codefly-dev/core/agents"
 	"github.com/codefly-dev/core/agents/services"
@@ -119,7 +120,8 @@ func (s *Service) createConnectionString(ctx context.Context, conf *basev0.Confi
 func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev0.Configuration, instance *basev0.NetworkInstance, withSSL bool) (*basev0.Configuration, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
-	connection, err := s.createConnectionString(ctx, conf, instance.Address, withSSL)
+	address := strings.Replace(instance.Address, "localhost", "host.docker.internal", -1)
+	connection, err := s.createConnectionString(ctx, conf, address, withSSL)
 	if err != nil {
 		return nil, s.Wool.Wrapf(err, "cannot create connection string")
 	}

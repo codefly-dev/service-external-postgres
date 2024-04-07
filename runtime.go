@@ -127,6 +127,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
+
 	user, password, err := s.getUserPassword(ctx, req.Configuration)
 	if err != nil {
 		return s.Runtime.InitError(err)
