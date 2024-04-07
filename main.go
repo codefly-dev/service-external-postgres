@@ -7,6 +7,7 @@ import (
 	"github.com/codefly-dev/core/builders"
 	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
 	"github.com/codefly-dev/core/templates"
+	"github.com/codefly-dev/core/wool"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -111,6 +112,7 @@ func (s *Service) createConnectionString(ctx context.Context, conf *basev0.Confi
 	if !withSSL {
 		conn += "?sslmode=disable"
 	}
+	s.Wool.Focus("CONN", wool.Field("conn", conn))
 	return conn, nil
 }
 
