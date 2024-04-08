@@ -54,7 +54,7 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 
 	s.Wool.Debug("endpoint", wool.Field("tcp", s.tcpEndpoint))
 
-	gettingStarted, err := templates.ApplyTemplateFrom(ctx, shared.Embed(factoryFS), "templates/factory/GETTING_STARTED.md", s.Information)
+	s.Builder.GettingStarted, err = templates.ApplyTemplateFrom(ctx, shared.Embed(factoryFS), "templates/factory/GETTING_STARTED.md", s.Information)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +65,7 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 		return s.Builder.LoadError(err)
 	}
 
-	return s.Builder.LoadResponse(gettingStarted)
+	return s.Builder.LoadResponse()
 }
 
 func (s *Builder) Init(ctx context.Context, req *builderv0.InitRequest) (*builderv0.InitResponse, error) {
@@ -216,10 +216,6 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 	s.Settings.DatabaseName, err = session.GetInputString(DatabaseName)
 	if err != nil {
 		return s.Builder.CreateError(err)
-	}
-
-	if err != nil {
-		return nil, s.Wool.Wrapf(err, "cannot create endpoints")
 	}
 
 	c := create{DatabaseName: s.Settings.DatabaseName, TableName: s.Builder.Service.Name}

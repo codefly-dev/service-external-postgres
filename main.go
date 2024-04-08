@@ -7,9 +7,9 @@ import (
 	"github.com/codefly-dev/core/builders"
 	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
 	"github.com/codefly-dev/core/templates"
-	"github.com/codefly-dev/core/wool"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"strings"
 
 	"github.com/codefly-dev/core/agents"
 	"github.com/codefly-dev/core/agents/services"
@@ -109,10 +109,9 @@ func (s *Service) createConnectionString(ctx context.Context, conf *basev0.Confi
 	}
 
 	conn := fmt.Sprintf("postgresql://%s:%s@%s/%s", user, password, address, s.DatabaseName)
-	if !withSSL {
+	if !withSSL || strings.Contains(address, "localhost") || strings.Contains(address, "host.docker.internal") {
 		conn += "?sslmode=disable"
 	}
-	s.Wool.Focus("CONN", wool.Field("conn", conn))
 	return conn, nil
 }
 
