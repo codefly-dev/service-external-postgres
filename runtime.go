@@ -111,7 +111,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	// Setup a connection string for migration
 	// We are inside the agent so we need to use the Native one!
-	hostInstance, err := configurations.FindNetworkInstance(ctx, s.NetworkMappings, s.tcpEndpoint, basev0.NetworkScope_Native)
+	hostInstance, err := configurations.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.tcpEndpoint, basev0.NetworkScope_Native)
 	if err != nil {
 		return s.Runtime.InitError(err)
 

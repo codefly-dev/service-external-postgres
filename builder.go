@@ -152,7 +152,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 
 	s.EnvironmentVariables.SetRunning(true)
 
-	instance, err := configurations.FindNetworkInstance(ctx, req.NetworkMappings, s.tcpEndpoint, v0.NetworkScope_External)
+	instance, err := configurations.FindNetworkInstanceInNetworkMappings(ctx, req.NetworkMappings, s.tcpEndpoint, v0.NetworkScope_External)
 	if err != nil {
 		return s.Builder.DeployError(err)
 	}
