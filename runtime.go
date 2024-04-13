@@ -30,11 +30,6 @@ type Runtime struct {
 	postgresPort uint16
 }
 
-func (s *Runtime) Test(ctx context.Context, req *runtimev0.TestRequest) (*runtimev0.TestResponse, error) {
-	//TODO implement me
-	panic("implement me")
-}
-
 func NewRuntime() *Runtime {
 	return &Runtime{
 		Service: NewService(),
@@ -138,13 +133,13 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		runner.WithPersistence()
 	}
 	runner.WithName(s.Global())
-	runner.WithOut(s.Wool)
+	runner.WithOut(s.Logger)
 	runner.WithPort(runners.DockerPortMapping{Container: s.postgresPort, Host: uint16(instance.Port)})
 
 	runner.WithEnvironmentVariables(
-		fmt.Sprintf("POSTGRES_USER=%s", user),
-		fmt.Sprintf("POSTGRES_PASSWORD=%s", password),
-		fmt.Sprintf("POSTGRES_DB=%s", s.DatabaseName))
+		configurations.Env("POSTGRES_USER", user),
+		configurations.Env("POSTGRES_PASSWORD", password),
+		configurations.Env("POSTGRES_DB", s.DatabaseName))
 
 	if s.Settings.Silent {
 		runner.WithSilence()
@@ -247,6 +242,11 @@ func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtim
 		return s.Runtime.StopError(err)
 	}
 	return s.Runtime.StopResponse()
+}
+
+func (s *Runtime) Test(ctx context.Context, req *runtimev0.TestRequest) (*runtimev0.TestResponse, error) {
+	//TODO implement me
+	panic("implement me")
 }
 
 func (s *Runtime) Communicate(ctx context.Context, req *agentv0.Engage) (*agentv0.InformationRequest, error) {
