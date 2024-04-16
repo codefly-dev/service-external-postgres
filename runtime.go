@@ -16,7 +16,7 @@ import (
 	"github.com/codefly-dev/core/configurations"
 	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
 	runtimev0 "github.com/codefly-dev/core/generated/go/services/runtime/v0"
-	"github.com/codefly-dev/core/runners"
+	runners "github.com/codefly-dev/core/runners/base"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	_ "github.com/lib/pq"
 )
@@ -25,7 +25,7 @@ type Runtime struct {
 	*Service
 
 	// internal
-	runner runners.Runner
+	runner runners.RunnerEnvironment
 
 	postgresPort uint16
 }
@@ -118,7 +118,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	s.Wool.Debug("connection string", wool.Field("connection", s.connection))
 
 	// Docker
-	runner, err := runners.NewDocker(ctx, runnerImage)
+	runner, err := runners.NewDockerHeadlessEnvironment(ctx, runnerImage, s.UniqueWithProject())
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
@@ -128,22 +128,13 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(err)
 	}
 
-	s.runner = runner
-	if s.Settings.Persist {
-		runner.WithPersistence()
-	}
-	runner.WithName(s.Global())
-	runner.WithOut(s.Logger)
-	runner.WithPort(runners.DockerPortMapping{Container: s.postgresPort, Host: uint16(instance.Port)})
+	runner.WithOutput(s.Logger)
+	runner.WithPortMapping(ctx, uint16(instance.Port), s.postgresPort)
 
 	runner.WithEnvironmentVariables(
 		configurations.Env("POSTGRES_USER", user),
 		configurations.Env("POSTGRES_PASSWORD", password),
 		configurations.Env("POSTGRES_DB", s.DatabaseName))
-
-	if s.Settings.Silent {
-		runner.WithSilence()
-	}
 
 	s.runner = runner
 
@@ -190,16 +181,9 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 
 	s.Wool.Debug("starting")
 
-	runningContext := s.Wool.Inject(context.Background())
-
-	err := s.runner.Start(runningContext)
-	if err != nil {
-		return s.Runtime.StartError(err)
-	}
-
 	s.Wool.Debug("waiting for ready")
 
-	err = s.WaitForReady(ctx)
+	err := s.WaitForReady(ctx)
 	if err != nil {
 		return s.Runtime.StartError(err)
 	}
@@ -229,14 +213,20 @@ func (s *Runtime) Information(ctx context.Context, req *runtimev0.InformationReq
 
 func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {
 	defer s.Wool.Catch()
+	if s.Settings.Persist {
+		s.Wool.Debug("persisting service")
+		return s.Runtime.StopResponse()
+	}
+
 	s.Wool.Debug("stopping service")
 
 	if s.runner != nil {
-		err := s.runner.Stop()
+		err := s.runner.Stop(ctx)
 		if err != nil {
 			return s.Runtime.StopError(err)
 		}
 	}
+
 	err := s.Base.Stop()
 	if err != nil {
 		return s.Runtime.StopError(err)
