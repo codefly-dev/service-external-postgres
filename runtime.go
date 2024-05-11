@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"fmt"
-	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
 	"strings"
 	"time"
 
@@ -13,9 +11,9 @@ import (
 	"github.com/codefly-dev/core/agents/services"
 	"github.com/codefly-dev/core/wool"
 
-	"github.com/codefly-dev/core/configurations"
 	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
 	runtimev0 "github.com/codefly-dev/core/generated/go/services/runtime/v0"
+	"github.com/codefly-dev/core/resources"
 	runners "github.com/codefly-dev/core/runners/base"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	_ "github.com/lib/pq"
@@ -25,7 +23,7 @@ type Runtime struct {
 	*Service
 
 	// internal
-	runner runners.RunnerEnvironment
+	runnerEnvironment *runners.DockerEnvironment
 
 	postgresPort uint16
 }
@@ -40,32 +38,29 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	s.Runtime.SetScope(req)
-
-	if !s.Runtime.Container() {
-		return s.Base.Runtime.LoadError(fmt.Errorf("not implemented: cannot load service in scope %s", req.Scope))
-	}
-
 	err := s.Base.Load(ctx, req.Identity, s.Settings)
 	if err != nil {
-		return s.Base.Runtime.LoadError(err)
+		return s.Runtime.LoadError(err)
 	}
+
+	s.Runtime.SetEnvironment(req.Environment)
 
 	requirements.Localize(s.Location)
 
 	// Endpoints
 	s.Endpoints, err = s.Runtime.Service.LoadEndpoints(ctx)
 	if err != nil {
-		return s.Base.Runtime.LoadError(err)
+		return s.Runtime.LoadError(err)
 	}
 
-	s.Wool.Debug("endpoints", wool.Field("endpoints", configurations.MakeManyEndpointSummary(s.Endpoints)))
+	s.Wool.Debug("endpoints", wool.Field("endpoints", resources.MakeManyEndpointSummary(s.Endpoints)))
 
-	s.tcpEndpoint, err = configurations.FindTCPEndpoint(ctx, s.Endpoints)
+	s.TcpEndpoint, err = resources.FindTCPEndpoint(ctx, s.Endpoints)
 	if err != nil {
-		return s.Base.Runtime.LoadError(err)
+		return s.Runtime.LoadError(err)
 	}
-	return s.Base.Runtime.LoadResponse()
+
+	return s.Runtime.LoadResponse()
 }
 
 func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtimev0.InitResponse, error) {
@@ -80,45 +75,56 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.Configuration = req.Configuration
 
-	net, err := configurations.FindNetworkMapping(ctx, s.NetworkMappings, s.tcpEndpoint)
+	net, err := resources.FindNetworkMapping(ctx, s.NetworkMappings, s.TcpEndpoint)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	instance, err := s.Runtime.NetworkInstance(ctx, s.NetworkMappings, s.tcpEndpoint)
+	if net == nil {
+		return s.Runtime.InitError(w.NewError("network mapping is nil"))
+	}
+
+	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.TcpEndpoint, resources.NewNativeNetworkAccess())
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	w.Debug("network instance", wool.Field("instance", instance))
+	if instance == nil {
+		return s.Runtime.InitError(w.NewError("network instance is nil"))
+	}
 
-	s.LogForward("will run on localhost:%d", instance.Port)
+	w.Debug("tcp network instance", wool.Field("instance", instance))
+
+	s.Infof("will run on %s", instance.Host)
 	s.postgresPort = 5432
 
-	// Create connection string configurations for the network instance
+	// Create connection string resources for the network instance
 	for _, inst := range net.Instances {
-		conf, err := s.CreateConnectionConfiguration(ctx, req.Configuration, inst, false)
-		if err != nil {
-			return s.Runtime.InitError(err)
+		conf, errConn := s.CreateConnectionConfiguration(ctx, req.Configuration, inst, false)
+		if errConn != nil {
+			return s.Runtime.InitError(errConn)
 		}
-		s.Runtime.ExportedConfigurations = append(s.Runtime.ExportedConfigurations, conf)
+		w.Debug("adding configuration", wool.Field("config", resources.MakeConfigurationSummary(conf)), wool.Field("instance", inst))
+		s.Runtime.RuntimeConfigurations = append(s.Runtime.RuntimeConfigurations, conf)
 	}
 
+	w.Debug("setting up connection string for migrations")
 	// Setup a connection string for migration
-	// We are inside the agent so we need to use the Native one!
-	hostInstance, err := configurations.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.tcpEndpoint, basev0.NetworkScope_Native)
+	hostInstance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.TcpEndpoint, resources.NewNativeNetworkAccess())
 	if err != nil {
 		return s.Runtime.InitError(err)
 
 	}
+
 	s.connection, err = s.createConnectionString(ctx, req.Configuration, hostInstance.Address, false)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
-	s.Wool.Debug("connection string", wool.Field("connection", s.connection))
+
+	w.Debug("connection string", wool.Field("connection", s.connection))
 
 	// Docker
-	runner, err := runners.NewDockerHeadlessEnvironment(ctx, runnerImage, s.UniqueWithProject())
+	runner, err := runners.NewDockerHeadlessEnvironment(ctx, image, s.UniqueWithWorkspace())
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
@@ -128,22 +134,24 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(err)
 	}
 
-	runner.WithOutput(s.Logger)
+	runner.WithOutput(s.Wool)
 	runner.WithPortMapping(ctx, uint16(instance.Port), s.postgresPort)
 
 	runner.WithEnvironmentVariables(
-		configurations.Env("POSTGRES_USER", user),
-		configurations.Env("POSTGRES_PASSWORD", password),
-		configurations.Env("POSTGRES_DB", s.DatabaseName))
+		resources.Env("POSTGRES_USER", user),
+		resources.Env("POSTGRES_PASSWORD", password),
+		resources.Env("POSTGRES_DB", s.DatabaseName))
 
-	s.runner = runner
+	s.runnerEnvironment = runner
 
-	err = s.runner.Init(ctx)
+	w.Debug("init for runner environment: will start container")
+	err = s.runnerEnvironment.Init(ctx)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	return s.Base.Runtime.InitResponse()
+	s.Wool.Debug("init successful")
+	return s.Runtime.InitResponse()
 }
 
 func (s *Runtime) WaitForReady(ctx context.Context) error {
@@ -152,8 +160,7 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 
 	s.Wool.Debug("waiting for ready", wool.Field("connection", s.connection))
 
-	maxRetry := 10
-	var err error
+	maxRetry := 5
 	for retry := 0; retry < maxRetry; retry++ {
 		db, err := sql.Open("postgres", s.connection)
 		if err != nil {
@@ -162,6 +169,7 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 
 		err = db.Ping()
 		if err == nil {
+			s.Wool.Debug("ping successful")
 			// Try to execute a simple query
 			_, err = db.Exec("SELECT 1")
 			if err == nil {
@@ -169,10 +177,10 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 				return nil
 			}
 		}
-		s.Wool.Debug("waiting for database", wool.ErrField(err))
-		time.Sleep(time.Second)
+		s.Wool.Debug("waiting for database to be ready", wool.ErrField(err))
+		time.Sleep(3 * time.Second)
 	}
-	return s.Wool.Wrapf(err, "cannot ping database")
+	return s.Wool.NewError("database is not ready")
 }
 
 func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runtimev0.StartResponse, error) {
@@ -195,7 +203,7 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 			return s.Runtime.StartError(err)
 		}
 
-		if s.Settings.Watch {
+		if s.Settings.HotReload {
 			conf := services.NewWatchConfiguration(requirements)
 			err := s.SetupWatcher(ctx, conf, s.EventHandler)
 			if err != nil {
@@ -213,25 +221,33 @@ func (s *Runtime) Information(ctx context.Context, req *runtimev0.InformationReq
 
 func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {
 	defer s.Wool.Catch()
-	if s.Settings.Persist {
-		s.Wool.Debug("persisting service")
-		return s.Runtime.StopResponse()
-	}
 
-	s.Wool.Debug("stopping service")
-
-	if s.runner != nil {
-		err := s.runner.Stop(ctx)
-		if err != nil {
-			return s.Runtime.StopError(err)
-		}
-	}
+	s.Wool.Debug("nothing to stop: keep environment alive")
 
 	err := s.Base.Stop()
 	if err != nil {
 		return s.Runtime.StopError(err)
 	}
 	return s.Runtime.StopResponse()
+}
+
+func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*runtimev0.DestroyResponse, error) {
+	defer s.Wool.Catch()
+	ctx = s.Wool.Inject(ctx)
+
+	s.Wool.Debug("Destroyting")
+
+	// Get the runner environment
+	runner, err := runners.NewDockerHeadlessEnvironment(ctx, image, s.UniqueWithWorkspace())
+	if err != nil {
+		return s.Runtime.DestroyError(err)
+	}
+
+	err = runner.Shutdown(ctx)
+	if err != nil {
+		return s.Runtime.DestroyError(err)
+	}
+	return s.Runtime.DestroyResponse()
 }
 
 func (s *Runtime) Test(ctx context.Context, req *runtimev0.TestRequest) (*runtimev0.TestResponse, error) {

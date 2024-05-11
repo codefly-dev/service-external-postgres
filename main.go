@@ -13,13 +13,13 @@ import (
 
 	"github.com/codefly-dev/core/agents"
 	"github.com/codefly-dev/core/agents/services"
-	"github.com/codefly-dev/core/configurations"
 	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
+	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/shared"
 )
 
 // Agent version
-var agent = shared.Must(configurations.LoadFromFs[configurations.Agent](shared.Embed(infoFS)))
+var agent = shared.Must(resources.LoadFromFs[resources.Agent](shared.Embed(infoFS)))
 
 var requirements = builders.NewDependencies(agent.Name,
 	builders.NewDependency("service.codefly.yaml"),
@@ -27,19 +27,17 @@ var requirements = builders.NewDependencies(agent.Name,
 )
 
 type Settings struct {
-	Debug bool `yaml:"debug"` // Developer only
-
 	DatabaseName string `yaml:"database-name"`
-	WithoutSSL   bool   `yaml:"without-ssl"` // Default to SSL
+	HotReload    bool   `yaml:"hot-reload"`
 
-	Watch   bool `yaml:"watch"`
-	Silent  bool `yaml:"silent"`
-	Persist bool `yaml:"persist"`
-
+	WithoutSSL  bool `yaml:"without-ssl"`  // Default to SSL
 	NoMigration bool `yaml:"no-migration"` // Developer only
 }
 
-var runnerImage = &configurations.DockerImage{Name: "postgres", Tag: "16.1"}
+const HotReload = "hot-reload"
+const DatabaseName = "database-name"
+
+var image = &resources.DockerImage{Name: "postgres", Tag: "16.1-alpine"}
 
 type Service struct {
 	*services.Base
@@ -50,7 +48,7 @@ type Service struct {
 	connectionKey string
 	connection    string
 
-	tcpEndpoint *basev0.Endpoint
+	TcpEndpoint *basev0.Endpoint
 }
 
 func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInformationRequest) (*agentv0.AgentInformation, error) {
@@ -82,16 +80,16 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 
 func NewService() *Service {
 	return &Service{
-		Base:     services.NewServiceBase(context.Background(), agent.Of(configurations.ServiceAgent)),
+		Base:     services.NewServiceBase(context.Background(), agent.Of(resources.ServiceAgent)),
 		Settings: &Settings{},
 	}
 }
 func (s *Service) getUserPassword(ctx context.Context, conf *basev0.Configuration) (string, string, error) {
-	user, err := configurations.GetConfigurationValue(ctx, conf, "postgres", "POSTGRES_USER")
+	user, err := resources.GetConfigurationValue(ctx, conf, "postgres", "POSTGRES_USER")
 	if err != nil {
 		return "", "", s.Wool.Wrapf(err, "cannot get user")
 	}
-	password, err := configurations.GetConfigurationValue(ctx, conf, "postgres", "POSTGRES_PASSWORD")
+	password, err := resources.GetConfigurationValue(ctx, conf, "postgres", "POSTGRES_PASSWORD")
 	if err != nil {
 		return "", "", s.Wool.Wrapf(err, "cannot get password")
 	}
@@ -124,8 +122,8 @@ func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev
 	}
 
 	outputConf := &basev0.Configuration{
-		Origin: s.Base.Service.Unique(),
-		Scope:  instance.Scope,
+		Origin:         s.Base.Service.Unique(),
+		RuntimeContext: resources.RuntimeContextFromInstance(instance),
 		Configurations: []*basev0.ConfigurationInformation{
 			{Name: "postgres",
 				ConfigurationValues: []*basev0.ConfigurationValue{
@@ -139,9 +137,9 @@ func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev
 
 func main() {
 	agents.Register(
-		services.NewServiceAgent(agent.Of(configurations.ServiceAgent), NewService()),
-		services.NewBuilderAgent(agent.Of(configurations.RuntimeServiceAgent), NewBuilder()),
-		services.NewRuntimeAgent(agent.Of(configurations.BuilderServiceAgent), NewRuntime()))
+		services.NewServiceAgent(agent.Of(resources.ServiceAgent), NewService()),
+		services.NewBuilderAgent(agent.Of(resources.RuntimeServiceAgent), NewBuilder()),
+		services.NewRuntimeAgent(agent.Of(resources.BuilderServiceAgent), NewRuntime()))
 }
 
 //go:embed agent.codefly.yaml

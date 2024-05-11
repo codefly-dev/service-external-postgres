@@ -5,8 +5,9 @@ import (
 	"embed"
 	"fmt"
 	dockerhelpers "github.com/codefly-dev/core/agents/helpers/docker"
-	"github.com/codefly-dev/core/configurations"
 	v0 "github.com/codefly-dev/core/generated/go/base/v0"
+	"github.com/codefly-dev/core/resources"
+	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/wool"
 
 	"github.com/codefly-dev/core/agents/communicate"
@@ -40,20 +41,25 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 
 	s.Wool.Debug("base loaded", wool.Field("identity", s.Identity))
 
+	if req.DisableCatch {
+		s.Wool.DisableCatch()
+	}
+
 	requirements.Localize(s.Location)
 
-	s.Builder.GettingStarted, err = templates.ApplyTemplateFrom(ctx, shared.Embed(factoryFS), "templates/factory/GETTING_STARTED.md", s.Information)
-	if err != nil {
-		return nil, err
-	}
-
-	// communication on CreateResponse
-	err = s.Communication.Register(ctx, communicate.New[builderv0.CreateRequest](s.createCommunicate()))
-	if err != nil {
-		return s.Builder.LoadError(err)
-	}
-
-	if req.AtCreate {
+	if req.CreationMode != nil {
+		s.Builder.CreationMode = req.CreationMode
+		s.Builder.GettingStarted, err = templates.ApplyTemplateFrom(ctx, shared.Embed(factoryFS), "templates/factory/GETTING_STARTED.md", s.Information)
+		if err != nil {
+			return nil, err
+		}
+		if req.CreationMode.Communicate {
+			// communication on CreateResponse
+			err = s.Communication.Register(ctx, communicate.New[builderv0.CreateRequest](s.createCommunicate()))
+			if err != nil {
+				return s.Builder.LoadError(err)
+			}
+		}
 		return s.Builder.LoadResponse()
 	}
 
@@ -62,12 +68,12 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 		return s.Builder.LoadError(err)
 	}
 
-	s.tcpEndpoint, err = configurations.FindTCPEndpoint(ctx, s.Endpoints)
+	s.TcpEndpoint, err = resources.FindTCPEndpoint(ctx, s.Endpoints)
 	if err != nil {
 		return s.Builder.LoadError(err)
 	}
 
-	s.Wool.Debug("endpoint", wool.Field("tcp", s.tcpEndpoint))
+	s.Wool.Debug("endpoint", wool.Field("tcp", s.TcpEndpoint))
 
 	return s.Builder.LoadResponse()
 }
@@ -98,7 +104,7 @@ type DockerTemplating struct {
 func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*builderv0.BuildResponse, error) {
 	defer s.Wool.Catch()
 
-	s.Wool.Debug("building migration docker runnerImage")
+	s.Wool.Debug("building migration docker image")
 
 	ctx = s.Wool.Inject(ctx)
 
@@ -107,13 +113,13 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 		return nil, s.Wool.Wrapf(err, "can only do docker build request")
 	}
 
-	image := s.DockerImage(dockerRequest)
+	img := s.DockerImage(dockerRequest)
 
-	if !dockerhelpers.IsValidDockerImageName(image.Name) {
-		return s.Builder.BuildError(fmt.Errorf("invalid docker runnerImage name: %s", image.Name))
+	if !dockerhelpers.IsValidDockerImageName(img.Name) {
+		return s.Builder.BuildError(fmt.Errorf("invalid docker image name: %s", img.Name))
 	}
 
-	connectionKey := configurations.ServiceSecretConfigurationKey(s.Base.Service, "postgres", "connection")
+	connectionKey := resources.ServiceSecretConfigurationKey(s.Base.Service, "postgres", "connection")
 	docker := DockerTemplating{ConnectionStringKeyHolder: fmt.Sprintf("{%s}", connectionKey)}
 
 	err = shared.DeleteFile(ctx, s.Local("builder/Dockerfile"))
@@ -129,7 +135,7 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	builder, err := dockerhelpers.NewBuilder(dockerhelpers.BuilderConfiguration{
 		Root:        s.Location,
 		Dockerfile:  "builder/Dockerfile",
-		Destination: image,
+		Destination: img,
 		Output:      s.Wool,
 	})
 	if err != nil {
@@ -140,7 +146,7 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 		return s.Builder.BuildError(err)
 	}
 
-	s.Builder.WithDockerImages(image)
+	s.Builder.WithDockerImages(img)
 
 	return s.Builder.BuildResponse()
 }
@@ -152,7 +158,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 
 	s.EnvironmentVariables.SetRunning(true)
 
-	instance, err := configurations.FindNetworkInstanceInNetworkMappings(ctx, req.NetworkMappings, s.tcpEndpoint, v0.NetworkScope_External)
+	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, req.NetworkMappings, s.TcpEndpoint, resources.NewPublicNetworkAccess())
 	if err != nil {
 		return s.Builder.DeployError(err)
 	}
@@ -194,14 +200,16 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	return s.Builder.DeployResponse()
 }
 
-const Watch = "watch"
-const DatabaseName = "database-name"
+func (s *Builder) Options() []*agentv0.Question {
+	return []*agentv0.Question{
+		communicate.NewConfirm(&agentv0.Message{Name: HotReload, Message: "Migration hot-reload (Recommended)?", Description: "codefly can restart your database when migration changes detected 🔎"}, true),
+		communicate.NewStringInput(&agentv0.Message{Name: DatabaseName, Message: "Name of the database?", Description: "Ensure encapsulation of your data"},
+			s.Base.Service.Module),
+	}
+}
 
 func (s *Builder) createCommunicate() *communicate.Sequence {
-	return communicate.NewSequence(
-		communicate.NewConfirm(&agentv0.Message{Name: Watch, Message: "Migration hot-reload (Recommended)?", Description: "codefly can restart your database when migration changes detected 🔎"}, true),
-		communicate.NewStringInput(&agentv0.Message{Name: DatabaseName, Message: "Name of the database?", Description: "Ensure encapsulation of your data"}, s.Builder.Service.Application),
-	)
+	return communicate.NewSequence(s.Options()...)
 }
 
 type create struct {
@@ -212,30 +220,59 @@ type create struct {
 func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*builderv0.CreateResponse, error) {
 	defer s.Wool.Catch()
 
-	session, err := s.Communication.Done(ctx, communicate.Channel[builderv0.CreateRequest]())
-	if err != nil {
-		return s.Builder.CreateError(err)
-	}
+	if s.Builder.CreationMode.Communicate {
+		s.Wool.Debug("using communicate mode")
+		session, err := s.Communication.Done(ctx, communicate.Channel[builderv0.CreateRequest]())
 
-	s.Settings.DatabaseName, err = session.GetInputString(DatabaseName)
-	if err != nil {
-		return s.Builder.CreateError(err)
-	}
+		if err != nil {
+			return s.Builder.CreateError(err)
+		}
 
+		s.Settings.DatabaseName, err = session.GetInputString(DatabaseName)
+		if err != nil {
+			return s.Builder.CreateError(err)
+		}
+	} else {
+		options := s.Options()
+		var err error
+
+		s.Settings.HotReload, err = communicate.GetDefaultConfirm(options, HotReload)
+		if err != nil {
+			return s.Builder.CreateError(err)
+		}
+
+		s.Settings.DatabaseName, err = communicate.GetDefaultStringInput(options, DatabaseName)
+		if err != nil {
+			return s.Builder.CreateError(err)
+		}
+	}
 	c := create{DatabaseName: s.Settings.DatabaseName, TableName: s.Builder.Service.Name}
-	err = s.Templates(ctx, c, services.WithFactory(factoryFS))
+
+	err := s.Templates(ctx, c, services.WithFactory(factoryFS))
 	if err != nil {
-		return s.Base.Builder.CreateError(err)
+		return s.Builder.CreateError(err)
 	}
 
-	s.Endpoints = []*v0.Endpoint{
-		{
-			Name:       "tcp",
-			Visibility: configurations.VisibilityExternal,
-		},
+	err = s.CreateEndpoints(ctx)
+	if err != nil {
+		return s.Builder.CreateErrorf(err, "cannot create endpoints")
 	}
 
-	return s.Base.Builder.CreateResponse(ctx, s.Settings)
+	s.Wool.Debug("created endpoints", wool.Field("endpoints", resources.MakeManyEndpointSummary(s.Endpoints)))
+
+	return s.Builder.CreateResponse(ctx, s.Settings)
+}
+
+func (s *Builder) CreateEndpoints(ctx context.Context) error {
+	tcp, err := resources.LoadTCPAPI(ctx)
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot load tcp api")
+	}
+	endpoint := s.Base.Service.BaseEndpoint(standards.TCP)
+	endpoint.Visibility = resources.VisibilityExternal
+	s.TcpEndpoint, err = resources.NewAPI(ctx, endpoint, resources.ToTCPAPI(tcp))
+	s.Endpoints = []*v0.Endpoint{s.TcpEndpoint}
+	return nil
 }
 
 //go:embed templates/factory
