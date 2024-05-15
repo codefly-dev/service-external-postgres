@@ -79,7 +79,7 @@ func TestCreateToRun(t *testing.T) {
 	// Configurations are passed in
 	conf := &basev0.Configuration{
 		Origin:         service.Unique(),
-		RuntimeContext: resources.RuntimeContextFree(),
+		RuntimeContext: resources.NewRuntimeContextFree(),
 		Configurations: []*basev0.ConfigurationInformation{
 			{Name: "postgres",
 				ConfigurationValues: []*basev0.ConfigurationValue{
@@ -91,6 +91,7 @@ func TestCreateToRun(t *testing.T) {
 	}
 
 	init, err := runtime.Init(ctx, &runtimev0.InitRequest{
+		RuntimeContext:          resources.NewRuntimeContextFree(),
 		Configuration:           conf,
 		ProposedNetworkMappings: networkMappings,
 	})
