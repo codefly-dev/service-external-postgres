@@ -1,4 +1,4 @@
-module github.com/codefly-dev/service-krakend
+module github.com/codefly-dev/service-external-postgres
 
 go 1.22.0
 
