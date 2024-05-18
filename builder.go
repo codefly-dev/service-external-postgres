@@ -156,7 +156,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 
 	s.Builder.LogDeployRequest(req, s.Wool.Debug)
 
-	s.EnvironmentVariables.SetRunning(true)
+	s.EnvironmentVariables.SetRunning()
 
 	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, req.NetworkMappings, s.TcpEndpoint, resources.NewPublicNetworkAccess())
 	if err != nil {
