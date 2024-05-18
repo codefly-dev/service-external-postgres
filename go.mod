@@ -3,7 +3,7 @@ module github.com/codefly-dev/service-external-postgres
 go 1.22.0
 
 require (
-	github.com/codefly-dev/core v0.1.104
+	github.com/codefly-dev/core v0.1.105
 	github.com/golang-migrate/migrate/v4 v4.17.1
 	github.com/lib/pq v1.10.9
 	github.com/stretchr/testify v1.9.0
