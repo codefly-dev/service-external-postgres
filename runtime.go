@@ -167,7 +167,6 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	s.Wool.Focus("FOIJOPJKC")
 	s.Wool.Focus("waiting for ready", wool.Field("connection", s.connection))
 
 	maxRetry := 5
