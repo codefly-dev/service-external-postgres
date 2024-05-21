@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"database/sql"
+	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
+	"os"
 	"strings"
 	"time"
 
@@ -63,6 +65,13 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 	return s.Runtime.LoadResponse()
 }
 
+func CallingContext() *basev0.NetworkAccess {
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return resources.NewContainerNetworkAccess()
+	}
+	return resources.NewNativeNetworkAccess()
+}
+
 func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtimev0.InitResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
@@ -84,7 +93,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(w.NewError("network mapping is nil"))
 	}
 
-	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.TcpEndpoint, resources.NewNativeNetworkAccess())
+	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.TcpEndpoint, CallingContext())
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
@@ -110,7 +119,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	w.Debug("setting up connection string for migrations")
 	// Setup a connection string for migration
-	hostInstance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.TcpEndpoint, resources.NewNativeNetworkAccess())
+	hostInstance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, s.NetworkMappings, s.TcpEndpoint, CallingContext())
 	if err != nil {
 		return s.Runtime.InitError(err)
 
@@ -121,7 +130,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(err)
 	}
 
-	w.Debug("connection string", wool.Field("connection", s.connection))
+	w.Focus("connection string", wool.Field("connection", s.connection))
 
 	// Docker
 	runner, err := runners.NewDockerHeadlessEnvironment(ctx, image, s.UniqueWithWorkspace())
@@ -158,7 +167,8 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	s.Wool.Debug("waiting for ready", wool.Field("connection", s.connection))
+	s.Wool.Focus("FOIJOPJKC")
+	s.Wool.Focus("waiting for ready", wool.Field("connection", s.connection))
 
 	maxRetry := 5
 	for retry := 0; retry < maxRetry; retry++ {
