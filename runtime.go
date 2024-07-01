@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
-	basev0 "github.com/codefly-dev/core/generated/go/base/v0"
+	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	"os"
 	"strings"
 	"time"
@@ -13,8 +13,8 @@ import (
 	"github.com/codefly-dev/core/agents/services"
 	"github.com/codefly-dev/core/wool"
 
-	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
-	runtimev0 "github.com/codefly-dev/core/generated/go/services/runtime/v0"
+	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
+	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
 	"github.com/codefly-dev/core/resources"
 	runners "github.com/codefly-dev/core/runners/base"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
@@ -116,6 +116,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		w.Debug("adding configuration", wool.Field("config", resources.MakeConfigurationSummary(conf)), wool.Field("instance", inst))
 		s.Runtime.RuntimeConfigurations = append(s.Runtime.RuntimeConfigurations, conf)
 	}
+	s.Wool.Focus("sending runtime configuration", wool.Field("conf", resources.MakeManyConfigurationSummary(s.Runtime.RuntimeConfigurations)))
 
 	w.Debug("setting up connection string for migrations")
 	// Setup a connection string for migration
@@ -147,6 +148,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	runner.WithPortMapping(ctx, uint16(instance.Port), s.postgresPort)
 
 	runner.WithEnvironmentVariables(
+		ctx,
 		resources.Env("POSTGRES_USER", user),
 		resources.Env("POSTGRES_PASSWORD", password),
 		resources.Env("POSTGRES_DB", s.DatabaseName))

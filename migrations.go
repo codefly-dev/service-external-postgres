@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/wool"
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
@@ -15,18 +16,36 @@ import (
 	"time"
 )
 
-func (s *Runtime) migrationPath() string {
+func (s *Runtime) migrationPath(ctx context.Context) (string, error) {
 	absolutePath := s.Local("migrations")
+	exists, err := shared.DirectoryExists(ctx, absolutePath)
+	if err != nil {
+		return "", s.Wool.Wrapf(err, "can check migration directory")
+	}
+
+	if !exists {
+		s.Wool.Debug("no migration folder found", wool.DirField(absolutePath))
+		return "", nil
+	}
 	u := url.URL{
 		Scheme: "file",
 		Path:   absolutePath,
 	}
-	return u.String()
+	return u.String(), nil
 }
 
 func (s *Runtime) applyMigration(ctx context.Context) error {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
+
+	// Check if we have migrations to apply
+	migrationPath, err := s.migrationPath(ctx)
+	if err != nil {
+		return s.Wool.Wrapf(err, "can check migration directory")
+	}
+	if migrationPath == "" {
+		return nil
+	}
 
 	s.Wool.Debug("migrations", wool.Field("connection", s.connection))
 	maxRetry := 3
@@ -42,7 +61,7 @@ func (s *Runtime) applyMigration(ctx context.Context) error {
 		}
 
 		m, err := migrate.NewWithDatabaseInstance(
-			s.migrationPath(),
+			migrationPath,
 			s.Settings.DatabaseName, driver)
 		if err != nil {
 			return s.Wool.Wrapf(err, "cannot create migration")
@@ -81,8 +100,16 @@ func (s *Runtime) updateMigration(ctx context.Context, migrationFile string) err
 		return s.Wool.Wrapf(err, "cannot create driver")
 	}
 
+	migrationPath, err := s.migrationPath(ctx)
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot get migration path")
+	}
+	if migrationPath == "" {
+		return nil
+	}
+
 	m, err := migrate.NewWithDatabaseInstance(
-		s.migrationPath(),
+		migrationPath,
 		s.Settings.DatabaseName, driver)
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot create migration")

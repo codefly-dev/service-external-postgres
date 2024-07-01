@@ -5,16 +5,16 @@ import (
 	"embed"
 	"fmt"
 	dockerhelpers "github.com/codefly-dev/core/agents/helpers/docker"
-	v0 "github.com/codefly-dev/core/generated/go/base/v0"
+	v0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/wool"
 
 	"github.com/codefly-dev/core/agents/communicate"
-	agentv0 "github.com/codefly-dev/core/generated/go/services/agent/v0"
+	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
 
 	"github.com/codefly-dev/core/agents/services"
-	builderv0 "github.com/codefly-dev/core/generated/go/services/builder/v0"
+	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/templates"
 )
@@ -101,8 +101,17 @@ type DockerTemplating struct {
 	ConnectionStringKeyHolder string
 }
 
+func (s *Builder) WithMigration() bool {
+	return !s.Settings.NoMigration
+}
+
 func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*builderv0.BuildResponse, error) {
 	defer s.Wool.Catch()
+
+	if !s.WithMigration() {
+		s.Wool.Debug("build: no migration")
+		return nil, nil
+	}
 
 	s.Wool.Debug("building migration docker image")
 
@@ -174,6 +183,13 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	}
 
 	s.Configuration = conf
+
+	s.Wool.Focus("exporting configuration", wool.Field("conf", resources.MakeConfigurationSummary(conf)))
+
+	if !s.WithMigration() {
+		s.Wool.Debug("deploy: no migration")
+		return s.Builder.DeployResponse()
+	}
 
 	cm, err := services.EnvsAsConfigMapData(s.EnvironmentVariables.Configurations()...)
 	if err != nil {
