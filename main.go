@@ -124,7 +124,7 @@ func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev
 	outputConf := &basev0.Configuration{
 		Origin:         s.Base.Service.Unique(),
 		RuntimeContext: resources.RuntimeContextFromInstance(instance),
-		Configurations: []*basev0.ConfigurationInformation{
+		Infos: []*basev0.ConfigurationInformation{
 			{Name: "postgres",
 				ConfigurationValues: []*basev0.ConfigurationValue{
 					{Key: "connection", Value: connection, Secret: true},

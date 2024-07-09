@@ -82,7 +82,7 @@ func TestCreateToRun(t *testing.T) {
 	conf := &basev0.Configuration{
 		Origin:         service.Unique(),
 		RuntimeContext: resources.NewRuntimeContextFree(),
-		Configurations: []*basev0.ConfigurationInformation{
+		Infos: []*basev0.ConfigurationInformation{
 			{Name: "postgres",
 				ConfigurationValues: []*basev0.ConfigurationValue{
 					{Key: "POSTGRES_USER", Value: "postgres"},
@@ -114,7 +114,7 @@ func TestCreateToRun(t *testing.T) {
 	require.NoError(t, err)
 
 	// extract the connection string
-	connString, err := resources.FindConfigurationValue(configurationOut, "postgres", "connection")
+	connString, err := resources.GetConfigurationValue(ctx, configurationOut, "postgres", "connection")
 	require.NoError(t, err)
 
 	// Do a SQL query
