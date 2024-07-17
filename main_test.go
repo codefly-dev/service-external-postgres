@@ -36,16 +36,17 @@ func TestCreateToRun(t *testing.T) {
 	}(tmpDir)
 
 	serviceName := fmt.Sprintf("svc-%v", time.Now().UnixMilli())
-	service := resources.Service{Name: serviceName, Module: "mod", Version: "test-me"}
-	err := service.SaveAtDir(ctx, path.Join(tmpDir, service.Unique()))
+	service := resources.Service{Name: serviceName, Version: "test-me"}
+	err := service.SaveAtDir(ctx, path.Join(tmpDir, "mod", service.Name))
+
 	require.NoError(t, err)
 
 	identity := &basev0.ServiceIdentity{
 		Name:                service.Name,
-		Module:              service.Module,
+		Module:              "mod",
 		Workspace:           workspace.Name,
 		WorkspacePath:       tmpDir,
-		RelativeToWorkspace: service.Unique(),
+		RelativeToWorkspace: fmt.Sprintf("mod/%s", service.Name),
 	}
 	builder := NewBuilder()
 
@@ -74,13 +75,13 @@ func TestCreateToRun(t *testing.T) {
 
 	require.Equal(t, 1, len(runtime.Endpoints))
 
-	networkMappings, err := networkManager.GenerateNetworkMappings(ctx, env, workspace, runtime.Base.Service, runtime.Endpoints)
+	networkMappings, err := networkManager.GenerateNetworkMappings(ctx, env, workspace, runtime.Identity, runtime.Endpoints)
 	require.NoError(t, err)
 	require.Equal(t, 1, len(networkMappings))
 
 	// Configurations are passed in
 	conf := &basev0.Configuration{
-		Origin:         service.Unique(),
+		Origin:         fmt.Sprintf("mod/%s", service.Name),
 		RuntimeContext: resources.NewRuntimeContextFree(),
 		Infos: []*basev0.ConfigurationInformation{
 			{Name: "postgres",
