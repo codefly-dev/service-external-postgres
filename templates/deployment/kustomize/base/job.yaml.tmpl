@@ -4,6 +4,8 @@ metadata:
   name: {{ .Service.Name.DNSCase }}
   namespace: {{ .Namespace }}
 spec:
+  ttlSecondsAfterFinished: 0
+  backoffLimit: 4
   template:
     metadata:
       annotations:

@@ -45,8 +45,10 @@ type Service struct {
 	// Settings
 	*Settings
 
-	connectionKey string
-	connection    string
+	postgresUser     string
+	postgresPassword string
+	connectionKey    string
+	connection       string
 
 	TcpEndpoint *basev0.Endpoint
 }
@@ -84,29 +86,30 @@ func NewService() *Service {
 		Settings: &Settings{},
 	}
 }
-func (s *Service) getUserPassword(ctx context.Context, conf *basev0.Configuration) (string, string, error) {
-	user, err := resources.GetConfigurationValue(ctx, conf, "postgres", "POSTGRES_USER")
-	if err != nil {
-		return "", "", s.Wool.Wrapf(err, "cannot get user")
-	}
-	password, err := resources.GetConfigurationValue(ctx, conf, "postgres", "POSTGRES_PASSWORD")
-	if err != nil {
-		return "", "", s.Wool.Wrapf(err, "cannot get password")
-	}
-	return user, password, nil
 
+func (s *Service) LoadConfiguration(ctx context.Context, conf *basev0.Configuration) error {
+	var err error
+	s.postgresUser, err = resources.GetConfigurationValue(ctx, conf, "postgres", "POSTGRES_USER")
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot get user")
+	}
+	s.postgresPassword, err = resources.GetConfigurationValue(ctx, conf, "postgres", "POSTGRES_PASSWORD")
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot get password")
+	}
+	return nil
 }
 
 func (s *Service) createConnectionString(ctx context.Context, conf *basev0.Configuration, address string, withSSL bool) (string, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	user, password, err := s.getUserPassword(ctx, conf)
+	err := s.LoadConfiguration(ctx, conf)
 	if err != nil {
 		return "", s.Wool.Wrapf(err, "cannot get user and password")
 	}
 
-	conn := fmt.Sprintf("postgresql://%s:%s@%s/%s", user, password, address, s.DatabaseName)
+	conn := fmt.Sprintf("postgresql://%s:%s@%s/%s", s.postgresUser, s.postgresPassword, address, s.DatabaseName)
 	if !withSSL || strings.Contains(address, "localhost") || strings.Contains(address, "host.docker.internal") {
 		conn += "?sslmode=disable"
 	}
@@ -122,7 +125,7 @@ func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev
 	}
 
 	outputConf := &basev0.Configuration{
-		Origin:         s.Base.Service.Unique(),
+		Origin:         s.Base.Unique(),
 		RuntimeContext: resources.RuntimeContextFromInstance(instance),
 		Infos: []*basev0.ConfigurationInformation{
 			{Name: "postgres",

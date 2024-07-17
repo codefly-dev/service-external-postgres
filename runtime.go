@@ -40,9 +40,11 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
+	s.Runtime.LogLoadRequest(req)
+
 	err := s.Base.Load(ctx, req.Identity, s.Settings)
 	if err != nil {
-		return s.Runtime.LoadError(err)
+		return s.Runtime.LoadErrorf(err, "loading base")
 	}
 
 	s.Runtime.SetEnvironment(req.Environment)
@@ -52,14 +54,14 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 	// Endpoints
 	s.Endpoints, err = s.Runtime.Service.LoadEndpoints(ctx)
 	if err != nil {
-		return s.Runtime.LoadError(err)
+		return s.Runtime.LoadErrorf(err, "cannot load endpoints")
 	}
 
 	s.Wool.Debug("endpoints", wool.Field("endpoints", resources.MakeManyEndpointSummary(s.Endpoints)))
 
 	s.TcpEndpoint, err = resources.FindTCPEndpoint(ctx, s.Endpoints)
 	if err != nil {
-		return s.Runtime.LoadError(err)
+		return s.Runtime.LoadErrorf(err, "cannot find TCP endpoint")
 	}
 
 	return s.Runtime.LoadResponse()
@@ -109,14 +111,14 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	// Create connection string resources for the network instance
 	for _, inst := range net.Instances {
-		conf, errConn := s.CreateConnectionConfiguration(ctx, req.Configuration, inst, false)
+		conf, errConn := s.CreateConnectionConfiguration(ctx, s.Configuration, inst, false)
 		if errConn != nil {
 			return s.Runtime.InitError(errConn)
 		}
 		w.Debug("adding configuration", wool.Field("config", resources.MakeConfigurationSummary(conf)), wool.Field("instance", inst))
 		s.Runtime.RuntimeConfigurations = append(s.Runtime.RuntimeConfigurations, conf)
 	}
-	s.Wool.Focus("sending runtime configuration", wool.Field("conf", resources.MakeManyConfigurationSummary(s.Runtime.RuntimeConfigurations)))
+	s.Wool.Debug("sending runtime configuration", wool.Field("conf", resources.MakeManyConfigurationSummary(s.Runtime.RuntimeConfigurations)))
 
 	w.Debug("setting up connection string for migrations")
 	// Setup a connection string for migration
@@ -126,12 +128,12 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	}
 
-	s.connection, err = s.createConnectionString(ctx, req.Configuration, hostInstance.Address, false)
+	s.connection, err = s.createConnectionString(ctx, s.Configuration, hostInstance.Address, false)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
-	w.Focus("connection string", wool.Field("connection", s.connection))
+	w.Debug("connection string", wool.Field("connection", s.connection))
 
 	// Docker
 	runner, err := runners.NewDockerHeadlessEnvironment(ctx, image, s.UniqueWithWorkspace())
@@ -139,7 +141,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(err)
 	}
 
-	user, password, err := s.getUserPassword(ctx, req.Configuration)
+	err = s.LoadConfiguration(ctx, s.Configuration)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
@@ -149,8 +151,8 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	runner.WithEnvironmentVariables(
 		ctx,
-		resources.Env("POSTGRES_USER", user),
-		resources.Env("POSTGRES_PASSWORD", password),
+		resources.Env("POSTGRES_USER", s.postgresUser),
+		resources.Env("POSTGRES_PASSWORD", s.postgresPassword),
 		resources.Env("POSTGRES_DB", s.DatabaseName))
 
 	s.runnerEnvironment = runner
@@ -169,7 +171,7 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
-	s.Wool.Focus("waiting for ready", wool.Field("connection", s.connection))
+	s.Wool.Debug("waiting for ready", wool.Field("connection", s.connection))
 
 	maxRetry := 5
 	for retry := 0; retry < maxRetry; retry++ {

@@ -128,7 +128,7 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 		return s.Builder.BuildError(fmt.Errorf("invalid docker image name: %s", img.Name))
 	}
 
-	connectionKey := resources.ServiceSecretConfigurationKey(s.Base.Service, "postgres", "connection")
+	connectionKey := resources.ServiceSecretConfigurationKey(s.Base.Identity, "postgres", "connection")
 	docker := DockerTemplating{ConnectionStringKeyHolder: fmt.Sprintf("{%s}", connectionKey)}
 
 	err = shared.DeleteFile(ctx, s.Local("builder/Dockerfile"))
@@ -167,6 +167,8 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 
 	s.EnvironmentVariables.SetRunning()
 
+	s.Base.SetDockerImage(image)
+
 	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, req.NetworkMappings, s.TcpEndpoint, resources.NewPublicNetworkAccess())
 	if err != nil {
 		return s.Builder.DeployError(err)
@@ -184,7 +186,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 
 	s.Configuration = conf
 
-	s.Wool.Focus("exporting configuration", wool.Field("conf", resources.MakeConfigurationSummary(conf)))
+	s.Wool.Debug("exporting configuration", wool.Field("conf", resources.MakeConfigurationSummary(conf)))
 
 	if !s.WithMigration() {
 		s.Wool.Debug("deploy: no migration")
@@ -220,7 +222,7 @@ func (s *Builder) Options() []*agentv0.Question {
 	return []*agentv0.Question{
 		communicate.NewConfirm(&agentv0.Message{Name: HotReload, Message: "Migration hot-reload (Recommended)?", Description: "codefly can restart your database when migration changes detected 🔎"}, true),
 		communicate.NewStringInput(&agentv0.Message{Name: DatabaseName, Message: "Name of the database?", Description: "Ensure encapsulation of your data"},
-			s.Base.Service.Module),
+			s.Base.Identity.Module),
 	}
 }
 
@@ -284,7 +286,7 @@ func (s *Builder) CreateEndpoints(ctx context.Context) error {
 	if err != nil {
 		return s.Wool.Wrapf(err, "cannot load tcp api")
 	}
-	endpoint := s.Base.Service.BaseEndpoint(standards.TCP)
+	endpoint := s.Base.BaseEndpoint(standards.TCP)
 	endpoint.Visibility = resources.VisibilityExternal
 	s.TcpEndpoint, err = resources.NewAPI(ctx, endpoint, resources.ToTCPAPI(tcp))
 	s.Endpoints = []*v0.Endpoint{s.TcpEndpoint}
