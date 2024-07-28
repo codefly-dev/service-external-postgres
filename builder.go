@@ -167,8 +167,6 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 
 	s.EnvironmentVariables.SetRunning()
 
-	s.Base.SetDockerImage(image)
-
 	instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, req.NetworkMappings, s.TcpEndpoint, resources.NewPublicNetworkAccess())
 	if err != nil {
 		return s.Builder.DeployError(err)
@@ -179,7 +177,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 		return s.Builder.DeployError(err)
 	}
 
-	err = s.EnvironmentVariables.AddConfigurations(conf)
+	err = s.EnvironmentVariables.AddConfigurations(ctx, conf)
 	if err != nil {
 		return s.Builder.DeployError(err)
 	}
