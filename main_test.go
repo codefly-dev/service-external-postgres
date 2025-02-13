@@ -38,7 +38,7 @@ func runTestWithFormat(t *testing.T, migrationFormat string) {
 
 	workspace := &resources.Workspace{Name: "test"}
 
-	tmpDir, err := os.MkdirTemp("testdata", "test-*")
+	tmpDir, err := os.MkdirTemp(".", "test-*")
 	require.NoError(t, err)
 	defer func(path string) {
 		os.RemoveAll(path)
