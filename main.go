@@ -4,12 +4,13 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"strings"
+
 	"github.com/codefly-dev/core/builders"
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	"github.com/codefly-dev/core/templates"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"strings"
 
 	"github.com/codefly-dev/core/agents"
 	"github.com/codefly-dev/core/agents/services"
@@ -27,17 +28,23 @@ var requirements = builders.NewDependencies(agent.Name,
 )
 
 type Settings struct {
-	DatabaseName string `yaml:"database-name"`
-	HotReload    bool   `yaml:"hot-reload"`
-
-	WithoutSSL  bool `yaml:"without-ssl"`  // Default to SSL
-	NoMigration bool `yaml:"no-migration"` // Developer only
+	DatabaseName                string  `yaml:"database-name"`
+	HotReload                   bool    `yaml:"hot-reload"`
+	WithoutSSL                  bool    `yaml:"without-ssl"`                    // Default to SSL
+	NoMigration                 bool    `yaml:"no-migration"`                   // Developer only
+	MigrationFormat             string  `yaml:"migration-format"`               // golang-migrate or dbmate
+	MigrationVersionDirOverride *string `yaml:"migration-version-dir-override"` // migrations directory
+	ImageOverride               *string `yaml:"image-override"`                 // image to use for the runtime
 }
 
-const HotReload = "hot-reload"
-const DatabaseName = "database-name"
+// Constants for settings
+const (
+	HotReload       = "hot-reload"
+	DatabaseName    = "database-name"
+	MigrationFormat = "migration-format"
+)
 
-var image = &resources.DockerImage{Name: "postgres", Tag: "16.1-alpine"}
+var image = &resources.DockerImage{Name: "postgres", Tag: "latest"}
 
 type Service struct {
 	*services.Base
@@ -47,7 +54,6 @@ type Service struct {
 
 	postgresUser     string
 	postgresPassword string
-	connectionKey    string
 	connection       string
 
 	TcpEndpoint *basev0.Endpoint
@@ -82,8 +88,10 @@ func (s *Service) GetAgentInformation(ctx context.Context, _ *agentv0.AgentInfor
 
 func NewService() *Service {
 	return &Service{
-		Base:     services.NewServiceBase(context.Background(), agent.Of(resources.ServiceAgent)),
-		Settings: &Settings{},
+		Base: services.NewServiceBase(context.Background(), agent.Of(resources.ServiceAgent)),
+		Settings: &Settings{
+			MigrationFormat: "gomigrate", // Default to golang-migrate for backward compatibility
+		},
 	}
 }
 

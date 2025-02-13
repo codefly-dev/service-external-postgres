@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+
 	dockerhelpers "github.com/codefly-dev/core/agents/helpers/docker"
 	v0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	"github.com/codefly-dev/core/resources"
@@ -92,8 +93,7 @@ func (s *Builder) Update(ctx context.Context, req *builderv0.UpdateRequest) (*bu
 
 func (s *Builder) Sync(ctx context.Context, req *builderv0.SyncRequest) (*builderv0.SyncResponse, error) {
 	defer s.Wool.Catch()
-	ctx = s.Wool.Inject(ctx)
-
+	_ = s.Wool.Inject(ctx)
 	return s.Builder.SyncResponse()
 }
 
@@ -218,9 +218,31 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 
 func (s *Builder) Options() []*agentv0.Question {
 	return []*agentv0.Question{
-		communicate.NewConfirm(&agentv0.Message{Name: HotReload, Message: "Migration hot-reload (Recommended)?", Description: "codefly can restart your database when migration changes detected 🔎"}, true),
-		communicate.NewStringInput(&agentv0.Message{Name: DatabaseName, Message: "Name of the database?", Description: "Ensure encapsulation of your data"},
-			s.Base.Identity.Module),
+		communicate.NewConfirm(&agentv0.Message{
+			Name:        HotReload,
+			Message:     "Migration hot-reload (Recommended)?",
+			Description: "codefly can restart your database when migration changes detected 🔎",
+		}, true),
+		communicate.NewStringInput(&agentv0.Message{
+			Name:        DatabaseName,
+			Message:     "Name of the database?",
+			Description: "Ensure encapsulation of your data",
+		}, s.Base.Identity.Module),
+		communicate.NewChoice(&agentv0.Message{
+			Name:        MigrationFormat,
+			Message:     "Choose migration format",
+			Description: "Select the database migration tool you prefer",
+		}, "gomigrate",
+			&agentv0.Message{
+				Name:        "gomigrate",
+				Message:     "Golang Migrate",
+				Description: "Regular SQL Migrations",
+			},
+			&agentv0.Message{
+				Name:        "alembic",
+				Message:     "Alembic",
+				Description: "Alembic is a database migration tool that is used to manage the database schema.",
+			}),
 	}
 }
 
@@ -229,22 +251,26 @@ func (s *Builder) createCommunicate() *communicate.Sequence {
 }
 
 type create struct {
-	DatabaseName string
-	TableName    string
+	DatabaseName    string
+	TableName       string
+	MigrationFormat string
 }
 
 func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*builderv0.CreateResponse, error) {
 	defer s.Wool.Catch()
 
 	if s.Builder.CreationMode.Communicate {
-		s.Wool.Debug("using communicate mode")
 		session, err := s.Communication.Done(ctx, communicate.Channel[builderv0.CreateRequest]())
-
 		if err != nil {
 			return s.Builder.CreateError(err)
 		}
 
 		s.Settings.DatabaseName, err = session.GetInputString(DatabaseName)
+		if err != nil {
+			return s.Builder.CreateError(err)
+		}
+
+		s.Settings.MigrationFormat, err = session.GetChoice(MigrationFormat)
 		if err != nil {
 			return s.Builder.CreateError(err)
 		}
@@ -256,15 +282,38 @@ func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*bu
 		if err != nil {
 			return s.Builder.CreateError(err)
 		}
+		if s.Settings.DatabaseName == "" {
 
-		s.Settings.DatabaseName, err = communicate.GetDefaultStringInput(options, DatabaseName)
-		if err != nil {
-			return s.Builder.CreateError(err)
+			s.Settings.DatabaseName, err = communicate.GetDefaultStringInput(options, DatabaseName)
+			if err != nil {
+				return s.Builder.CreateError(err)
+			}
+		}
+		if s.Settings.MigrationFormat == "" {
+			s.Settings.MigrationFormat, err = communicate.GetDefaultChoice(options, MigrationFormat)
+			if err != nil {
+				return s.Builder.CreateError(err)
+			}
 		}
 	}
-	c := create{DatabaseName: s.Settings.DatabaseName, TableName: s.Builder.Service.Name}
 
-	err := s.Templates(ctx, c, services.WithFactory(factoryFS))
+	c := create{
+		DatabaseName:    s.Settings.DatabaseName,
+		TableName:       s.Builder.Service.Name,
+		MigrationFormat: s.Settings.MigrationFormat,
+	}
+
+	var migrationTemplate *services.TemplateWrapper
+	switch s.Settings.MigrationFormat {
+	case "gomigrate":
+		migrationTemplate = services.WithDir(gomigrateFS, "templates/migrations/gomigrate").WithDestination(s.Local("migrations"))
+	case "alembic":
+		migrationTemplate = services.WithDir(alembicFS, "templates/migrations/alembic").WithDestination(s.Local("migrations"))
+	default:
+		return s.Builder.CreateError(fmt.Errorf("invalid migration format: %s", s.Settings.MigrationFormat))
+	}
+
+	err := s.Templates(ctx, c, services.WithFactory(factoryFS), migrationTemplate)
 	if err != nil {
 		return s.Builder.CreateError(err)
 	}
@@ -287,6 +336,9 @@ func (s *Builder) CreateEndpoints(ctx context.Context) error {
 	endpoint := s.Base.BaseEndpoint(standards.TCP)
 	endpoint.Visibility = resources.VisibilityExternal
 	s.TcpEndpoint, err = resources.NewAPI(ctx, endpoint, resources.ToTCPAPI(tcp))
+	if err != nil {
+		return s.Wool.Wrapf(err, "cannot create tcp endpoint")
+	}
 	s.Endpoints = []*v0.Endpoint{s.TcpEndpoint}
 	return nil
 }
@@ -299,3 +351,9 @@ var builderFS embed.FS
 
 //go:embed templates/deployment
 var deploymentFS embed.FS
+
+//go:embed templates/migrations/gomigrate
+var gomigrateFS embed.FS
+
+//go:embed templates/migrations/alembic
+var alembicFS embed.FS

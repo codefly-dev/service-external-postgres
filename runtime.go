@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"database/sql"
-	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	"os"
 	"strings"
 	"time"
+
+	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
+	"github.com/codefly-dev/core/shared"
 
 	"github.com/codefly-dev/core/agents/helpers/code"
 
@@ -19,6 +21,8 @@ import (
 	runners "github.com/codefly-dev/core/runners/base"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	_ "github.com/lib/pq"
+
+	"github.com/codefly-dev/service-external-postgres/migrations"
 )
 
 type Runtime struct {
@@ -27,7 +31,8 @@ type Runtime struct {
 	// internal
 	runnerEnvironment *runners.DockerEnvironment
 
-	postgresPort uint16
+	postgresPort     uint16
+	migrationManager migrations.Manager
 }
 
 func NewRuntime() *Runtime {
@@ -118,6 +123,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		w.Debug("adding configuration", wool.Field("config", resources.MakeConfigurationSummary(conf)), wool.Field("instance", inst))
 		s.Runtime.RuntimeConfigurations = append(s.Runtime.RuntimeConfigurations, conf)
 	}
+
 	s.Wool.Debug("sending runtime configuration", wool.Field("conf", resources.MakeManyConfigurationSummary(s.Runtime.RuntimeConfigurations)))
 
 	w.Debug("setting up connection string for migrations")
@@ -136,11 +142,19 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	w.Debug("connection string", wool.Field("connection", s.connection))
 
 	// Docker
-	runner, err := runners.NewDockerHeadlessEnvironment(ctx, image, s.UniqueWithWorkspace())
+	runnerImage := image
+	if s.Settings.ImageOverride != nil {
+		runnerImage, err = resources.ParseDockerImage(*s.Settings.ImageOverride)
+		if err != nil {
+			return s.Runtime.InitError(err)
+		}
+	}
+
+	runner, err := runners.NewDockerHeadlessEnvironment(ctx, runnerImage, s.UniqueWithWorkspace())
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
-
+	s.runnerEnvironment = runner
 	err = s.LoadConfiguration(ctx, s.Configuration)
 	if err != nil {
 		return s.Runtime.InitError(err)
@@ -163,13 +177,37 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(err)
 	}
 
+	if !s.Settings.NoMigration {
+		migrationConfig := migrations.Config{
+			DatabaseName: s.Settings.DatabaseName,
+			MigrationDir: s.Local("migrations"),
+		}
+		if s.Settings.MigrationVersionDirOverride != nil {
+			versionOverride := s.Local(*s.Settings.MigrationVersionDirOverride)
+			empty, err := shared.CheckEmptyDirectory(ctx, versionOverride)
+			if err != nil {
+				return s.Runtime.InitError(err)
+			}
+			if empty {
+				return s.Runtime.InitError(w.NewError("migration version directory is empty"))
+			}
+			migrationConfig.MigrationVersionDirOverride = shared.Pointer(versionOverride)
+		}
+
+		manager, err := migrations.NewManager(ctx, s.Settings.MigrationFormat, migrationConfig)
+		if err != nil {
+			return s.Runtime.InitError(err)
+		}
+		s.migrationManager = manager
+	}
+
 	s.Wool.Debug("init successful")
 	return s.Runtime.InitResponse()
 }
 
 func (s *Runtime) WaitForReady(ctx context.Context) error {
 	defer s.Wool.Catch()
-	ctx = s.Wool.Inject(ctx)
+	_ = s.Wool.Inject(ctx)
 
 	s.Wool.Debug("waiting for ready", wool.Field("connection", s.connection))
 
@@ -209,19 +247,24 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 		return s.Runtime.StartError(err)
 	}
 
-	if !s.Settings.NoMigration {
-		s.Wool.Debug("applying migrations")
-		err = s.applyMigration(ctx)
+	if !s.Settings.NoMigration && s.migrationManager != nil {
+		err = s.migrationManager.Init(ctx, s.Runtime.RuntimeConfigurations)
 		if err != nil {
 			return s.Runtime.StartError(err)
 		}
+		s.Wool.Focus("applying migrations")
+		err = s.migrationManager.Apply(ctx)
+		if err != nil {
+			return s.Runtime.StartError(err)
+		}
+		s.Wool.Focus("migrations applied")
+	}
 
-		if s.Settings.HotReload {
-			conf := services.NewWatchConfiguration(requirements)
-			err := s.SetupWatcher(ctx, conf, s.EventHandler)
-			if err != nil {
-				s.Wool.Warn("error in watcher", wool.ErrField(err))
-			}
+	if s.Settings.HotReload {
+		conf := services.NewWatchConfiguration(requirements)
+		err := s.SetupWatcher(ctx, conf, s.EventHandler)
+		if err != nil {
+			s.Wool.Warn("error in watcher", wool.ErrField(err))
 		}
 	}
 	s.Wool.Debug("start done")
@@ -276,8 +319,8 @@ func (s *Runtime) Communicate(ctx context.Context, req *agentv0.Engage) (*agentv
  */
 
 func (s *Runtime) EventHandler(event code.Change) error {
-	if strings.Contains(event.Path, "migrations") {
-		err := s.updateMigration(context.Background(), event.Path)
+	if strings.Contains(event.Path, "migrations") && s.migrationManager != nil {
+		err := s.migrationManager.Update(context.Background(), event.Path)
 		if err != nil {
 			s.Wool.Warn("cannot apply migration", wool.ErrField(err))
 		}
