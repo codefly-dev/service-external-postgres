@@ -38,16 +38,15 @@ func runTestWithFormat(t *testing.T, migrationFormat string) {
 
 	workspace := &resources.Workspace{Name: "test"}
 
-	tmpDir := t.TempDir()
+	tmpDir, err := os.MkdirTemp("testdata", "test-*")
+	require.NoError(t, err)
 	defer func(path string) {
-		if os.Getenv("CLEANUP") == "true" {
-			os.RemoveAll(path)
-		}
+		os.RemoveAll(path)
 	}(tmpDir)
 
 	serviceName := fmt.Sprintf("svc-%v", time.Now().UnixMilli())
 	service := resources.Service{Name: serviceName, Version: "test-me"}
-	err := service.SaveAtDir(ctx, path.Join(tmpDir, "mod", service.Name))
+	err = service.SaveAtDir(ctx, path.Join(tmpDir, "mod", service.Name))
 	require.NoError(t, err)
 
 	identity := &basev0.ServiceIdentity{
