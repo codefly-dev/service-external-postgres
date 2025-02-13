@@ -1,10 +1,16 @@
 FROM python:3.12-alpine
 
+# Prevent Python from writing bytecode
+ENV PYTHONDONTWRITEBYTECODE=1
+
 # Install PostgreSQL client
 RUN apk add --no-cache postgresql-client
 
 # Create non-root user
 RUN adduser -D appuser
+
+# Set up workspace with proper permissions
+RUN mkdir -p /workspace && chown -R appuser:appuser /workspace
 
 RUN pip install alembic psycopg2-binary sqlalchemy requests python-dotenv pgvector
 
@@ -12,5 +18,3 @@ WORKDIR /workspace
 
 # Switch to non-root user
 USER appuser
-
-ENV PYTHONDONTWRITEBYTECODE=1
