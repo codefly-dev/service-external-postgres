@@ -40,8 +40,9 @@ func runTestWithFormat(t *testing.T, migrationFormat string) {
 
 	tmpDir := t.TempDir()
 	defer func(path string) {
-		err := os.RemoveAll(path)
-		require.NoError(t, err)
+		if os.Getenv("CLEANUP") == "true" {
+			os.RemoveAll(path)
+		}
 	}(tmpDir)
 
 	serviceName := fmt.Sprintf("svc-%v", time.Now().UnixMilli())
