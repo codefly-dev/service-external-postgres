@@ -71,7 +71,7 @@ func (a *Alembic) getRunner(ctx context.Context) (*runners.DockerEnvironment, er
 	}
 
 	// Use our custom image with alembic pre-installed
-	image := &resources.DockerImage{Name: "codeflydev/alembic", Tag: "latest"}
+	image := &resources.DockerImage{Name: "docker.io/codeflydev/alembic", Tag: "latest"}
 	runner, err := runners.NewDockerEnvironment(ctx, image, a.config.MigrationDir, name)
 	if err != nil {
 		return nil, a.w.Wrapf(err, "cannot create docker environment")
