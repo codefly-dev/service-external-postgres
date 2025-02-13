@@ -17,6 +17,10 @@ jobs:
         with:
           go-version: 1.21.4
 
+      - name: Pull required Docker images
+        run: |
+          docker pull codeflydev/alembic:latest
+
       - name: test
         run: go test -v ./...
 
