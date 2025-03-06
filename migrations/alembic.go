@@ -72,6 +72,12 @@ func (a *Alembic) getRunner(ctx context.Context) (*runners.DockerEnvironment, er
 
 	// Use our custom image with alembic pre-installed
 	image := &resources.DockerImage{Name: "codeflydev/alembic", Tag: "latest"}
+	if a.config.ImageOverride != nil {
+		image, err = resources.ParseDockerImage(*a.config.ImageOverride)
+		if err != nil {
+			return nil, a.w.Wrapf(err, "cannot parse alembic image override")
+		}
+	}
 	runner, err := runners.NewDockerEnvironment(ctx, image, a.config.MigrationDir, name)
 	if err != nil {
 		return nil, a.w.Wrapf(err, "cannot create docker environment")
@@ -183,6 +189,9 @@ func (a *Alembic) Apply(ctx context.Context) error {
 
 	// Log tables but don't fail if empty
 	a.w.Focus("tables in database", wool.Field("tables", tables))
+	if len(tables) == 0 {
+		return a.w.Wrap(fmt.Errorf("no tables found in database: migrations failed"))
+	}
 	return nil
 }
 

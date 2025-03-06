@@ -25,6 +25,9 @@ type Config struct {
 
 	// Optional override for the migration version directory
 	MigrationVersionDirOverride *string
+
+	// Optional override for the alembic image
+	ImageOverride *string
 }
 
 // NewManager creates a migration manager based on the specified format

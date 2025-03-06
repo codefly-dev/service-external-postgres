@@ -35,6 +35,7 @@ type Settings struct {
 	MigrationFormat             string  `yaml:"migration-format"`               // golang-migrate or dbmate
 	MigrationVersionDirOverride *string `yaml:"migration-version-dir-override"` // migrations directory
 	ImageOverride               *string `yaml:"image-override"`                 // image to use for the runtime
+	AlembicImageOverride        *string `yaml:"alembic-image-override"`         // image to use for alembic migrations
 }
 
 // Constants for settings

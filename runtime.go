@@ -182,6 +182,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 			DatabaseName: s.Settings.DatabaseName,
 			MigrationDir: s.Local("migrations"),
 		}
+
 		if s.Settings.MigrationVersionDirOverride != nil {
 			versionOverride := s.Local(*s.Settings.MigrationVersionDirOverride)
 			empty, err := shared.CheckEmptyDirectory(ctx, versionOverride)
@@ -192,6 +193,10 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 				return s.Runtime.InitError(w.NewError("migration version directory is empty"))
 			}
 			migrationConfig.MigrationVersionDirOverride = shared.Pointer(versionOverride)
+		}
+
+		if s.Settings.AlembicImageOverride != nil && s.Settings.MigrationFormat == "alembic" {
+			migrationConfig.ImageOverride = s.Settings.AlembicImageOverride
 		}
 
 		manager, err := migrations.NewManager(ctx, s.Settings.MigrationFormat, migrationConfig)
