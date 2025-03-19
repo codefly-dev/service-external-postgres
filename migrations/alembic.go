@@ -158,40 +158,70 @@ func (a *Alembic) Apply(ctx context.Context) error {
 
 	a.w.Focus("checking tables in database")
 
-	// Check tables using native connection
-	db, err := sql.Open("postgres", a.nativeConnection)
-	if err != nil {
-		return a.w.Wrapf(err, "cannot open database")
-	}
-	defer db.Close()
-
-	// List all tables including version tables
-	rows, err := db.Query(`
-		SELECT tablename
-		FROM pg_catalog.pg_tables
-		WHERE schemaname = 'public'
-		AND tablename NOT LIKE 'pg_%'
-		AND tablename NOT LIKE 'sql_%'
-		AND tablename != 'alembic_version'
-	`)
-	if err != nil {
-		return a.w.Wrapf(err, "cannot query tables")
-	}
-	defer rows.Close()
-
+	// Check tables using container connection with retries
+	maxRetries := 5
+	retryDelay := time.Second * 2
 	var tables []string
-	for rows.Next() {
-		var table string
-		if err := rows.Scan(&table); err != nil {
-			return a.w.Wrapf(err, "cannot scan table info")
+	var lastErr error
+
+	for i := 0; i < maxRetries; i++ {
+		if i > 0 {
+			a.w.Debug("retrying table check", wool.Field("attempt", i+1))
+			time.Sleep(retryDelay)
 		}
-		tables = append(tables, table)
+
+		db, err := sql.Open("postgres", a.containerConnection)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		defer db.Close()
+
+		// Test the connection
+		err = db.Ping()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		// List all tables including version tables
+		query := `
+			SELECT tablename
+			FROM pg_catalog.pg_tables
+			WHERE schemaname = 'public'
+			AND tablename NOT LIKE 'pg_%'
+			AND tablename NOT LIKE 'sql_%'
+			AND tablename != 'alembic_version'
+		`
+		rows, err := db.Query(query)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		defer rows.Close()
+
+		tables = nil
+		for rows.Next() {
+			var table string
+			if err := rows.Scan(&table); err != nil {
+				lastErr = err
+				continue
+			}
+			tables = append(tables, table)
+		}
+
+		if len(tables) > 0 {
+			break
+		}
 	}
 
 	// Log tables but don't fail if empty
 	a.w.Focus("tables in database", wool.Field("tables", tables))
 	if len(tables) == 0 {
-		return a.w.Wrap(fmt.Errorf("no tables found in database: migrations failed"))
+		if lastErr != nil {
+			return a.w.Wrapf(lastErr, "failed to check tables after %d attempts", maxRetries)
+		}
+		return a.w.Wrap(fmt.Errorf("no tables found in database after %d attempts: migrations failed", maxRetries))
 	}
 	return nil
 }
