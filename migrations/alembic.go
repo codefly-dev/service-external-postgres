@@ -158,7 +158,7 @@ func (a *Alembic) Apply(ctx context.Context) error {
 
 	a.w.Focus("checking tables in database")
 
-	// Check tables using container connection with retries
+	// Check tables using native connection with retries
 	maxRetries := 5
 	retryDelay := time.Second * 2
 	var tables []string
@@ -170,7 +170,7 @@ func (a *Alembic) Apply(ctx context.Context) error {
 			time.Sleep(retryDelay)
 		}
 
-		db, err := sql.Open("postgres", a.containerConnection)
+		db, err := sql.Open("postgres", a.nativeConnection)
 		if err != nil {
 			lastErr = err
 			continue
