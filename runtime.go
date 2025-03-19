@@ -216,27 +216,53 @@ func (s *Runtime) WaitForReady(ctx context.Context) error {
 
 	s.Wool.Debug("waiting for ready", wool.Field("connection", s.connection))
 
-	maxRetry := 5
+	// Add connection timeout to the connection string
+	connString := s.connection
+	if !strings.Contains(connString, "connect_timeout=") {
+		if strings.Contains(connString, "?") {
+			connString += "&connect_timeout=10"
+		} else {
+			connString += "?connect_timeout=10"
+		}
+	}
+
+	maxRetry := 10 // Increased from 5
+	retryDelay := 3 * time.Second
 	for retry := 0; retry < maxRetry; retry++ {
-		db, err := sql.Open("postgres", s.connection)
+		db, err := sql.Open("postgres", connString)
 		if err != nil {
-			return s.Wool.Wrapf(err, "cannot open database")
+			s.Wool.Debug("failed to open database connection", wool.ErrField(err))
+			time.Sleep(retryDelay)
+			continue
 		}
 
-		err = db.Ping()
+		// Set connection timeout
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		err = db.PingContext(ctx)
+		cancel()
+
 		if err == nil {
 			s.Wool.Debug("ping successful")
-			// Try to execute a simple query
-			_, err = db.Exec("SELECT 1")
+			// Try to execute a simple query with timeout
+			ctx, cancel = context.WithTimeout(ctx, 10*time.Second)
+			_, err = db.ExecContext(ctx, "SELECT 1")
+			cancel()
+
 			if err == nil {
 				s.Wool.Debug("database ready!")
 				return nil
 			}
 		}
-		s.Wool.Debug("waiting for database to be ready", wool.ErrField(err))
-		time.Sleep(3 * time.Second)
+
+		s.Wool.Debug("waiting for database to be ready",
+			wool.ErrField(err),
+			wool.Field("retry", retry+1),
+			wool.Field("max_retries", maxRetry))
+
+		time.Sleep(retryDelay)
 	}
-	return s.Wool.NewError("database is not ready")
+
+	return s.Wool.NewError("database is not ready after maximum retries")
 }
 
 func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runtimev0.StartResponse, error) {

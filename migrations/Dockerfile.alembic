@@ -12,9 +12,20 @@ RUN adduser -D appuser
 # Set up workspace with proper permissions
 RUN mkdir -p /workspace && chown -R appuser:appuser /workspace
 
-RUN pip install alembic psycopg2-binary sqlalchemy requests python-dotenv pgvector
+# Install specific versions of packages
+RUN pip install --no-cache-dir \
+    alembic==1.13.1 \
+    psycopg2-binary==2.9.9 \
+    sqlalchemy==2.0.27 \
+    requests==2.31.0 \
+    python-dotenv==1.0.1 \
+    pgvector==0.2.5
 
 WORKDIR /workspace
+
+# Add healthcheck
+HEALTHCHECK --interval=5s --timeout=5s --start-period=5s --retries=3 \
+    CMD pg_isready -h localhost -p 5432 || exit 1
 
 # Switch to non-root user
 USER appuser
