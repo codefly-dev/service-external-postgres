@@ -46,7 +46,13 @@ func runTestWithFormat(t *testing.T, migrationFormat string) {
 	var err error
 	serviceName := fmt.Sprintf("svc-%v", time.Now().UnixMilli())
 	service := resources.Service{Name: serviceName, Version: "test-me"}
-	err = service.SaveAtDir(ctx, path.Join(tmpDir, "mod", service.Name))
+	serviceDir := path.Join(tmpDir, "mod", service.Name)
+	err = service.SaveAtDir(ctx, serviceDir)
+	require.NoError(t, err)
+
+	// Ensure migrations directory exists
+	migrationsDir := path.Join(serviceDir, "migrations")
+	err = os.MkdirAll(migrationsDir, 0755)
 	require.NoError(t, err)
 
 	identity := &basev0.ServiceIdentity{
@@ -58,6 +64,7 @@ func runTestWithFormat(t *testing.T, migrationFormat string) {
 	}
 	builder := NewBuilder()
 	builder.Settings.MigrationFormat = migrationFormat
+	builder.Settings.DatabaseName = serviceName // Set database name to match service name
 
 	resp, err := builder.Load(ctx, &builderv0.LoadRequest{DisableCatch: true, Identity: identity, CreationMode: &builderv0.CreationMode{Communicate: false}})
 	require.NoError(t, err)
@@ -65,6 +72,21 @@ func runTestWithFormat(t *testing.T, migrationFormat string) {
 
 	_, err = builder.Create(ctx, &builderv0.CreateRequest{})
 	require.NoError(t, err)
+
+	// Debug: Check if migration files were created
+	entries, err := os.ReadDir(migrationsDir)
+	require.NoError(t, err)
+	t.Logf("Migration files in %s:", migrationsDir)
+	for _, entry := range entries {
+		t.Logf("- %s", entry.Name())
+		if entry.IsDir() {
+			subEntries, err := os.ReadDir(path.Join(migrationsDir, entry.Name()))
+			require.NoError(t, err)
+			for _, subEntry := range subEntries {
+				t.Logf("  - %s", subEntry.Name())
+			}
+		}
+	}
 
 	runtime := NewRuntime()
 	runtime.Settings.MigrationFormat = migrationFormat

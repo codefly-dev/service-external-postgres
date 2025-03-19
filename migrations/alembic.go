@@ -172,6 +172,7 @@ func (a *Alembic) Apply(ctx context.Context) error {
 		WHERE schemaname = 'public'
 		AND tablename NOT LIKE 'pg_%'
 		AND tablename NOT LIKE 'sql_%'
+		AND tablename != 'alembic_version'
 	`)
 	if err != nil {
 		return a.w.Wrapf(err, "cannot query tables")
