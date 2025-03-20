@@ -100,6 +100,10 @@ func (a *Alembic) getRunner(ctx context.Context) (*runners.DockerEnvironment, er
 }
 
 func (a *Alembic) Apply(ctx context.Context) error {
+	// Create a detached context with no timeout/deadline for migration operations
+	// This will prevent context cancellation from interfering with DB operations
+	migrationCtx := context.Background()
+
 	runner, err := a.getRunner(ctx)
 	if err != nil {
 		return err
@@ -124,7 +128,7 @@ func (a *Alembic) Apply(ctx context.Context) error {
 		return a.w.Wrapf(err, "cannot create current process")
 	}
 	currentProc.WithOutput(a.w)
-	err = currentProc.Run(ctx)
+	err = currentProc.Run(migrationCtx) // Use the detached context
 	if err != nil {
 		return a.w.Wrapf(err, "cannot check current version")
 	}
@@ -138,7 +142,7 @@ func (a *Alembic) Apply(ctx context.Context) error {
 	proc.WithOutput(a.w)
 
 	a.w.Focus("running upgrade process")
-	err = proc.Run(ctx)
+	err = proc.Run(migrationCtx) // Use the detached context
 	if err != nil {
 		return a.w.Wrapf(err, "alembic upgrade failed")
 	}
@@ -152,7 +156,7 @@ func (a *Alembic) Apply(ctx context.Context) error {
 		a.w.Warn("cannot check for active transactions", wool.ErrField(err))
 	} else {
 		txProc.WithOutput(a.w)
-		_ = txProc.Run(ctx) // Don't fail if this doesn't work
+		_ = txProc.Run(migrationCtx) // Use detached context
 	}
 
 	// Attempt to explicitly commit any pending transactions
@@ -162,7 +166,7 @@ func (a *Alembic) Apply(ctx context.Context) error {
 		a.w.Warn("cannot run commit command", wool.ErrField(err))
 	} else {
 		commitProc.WithOutput(a.w)
-		_ = commitProc.Run(ctx) // Don't fail if this doesn't work
+		_ = commitProc.Run(migrationCtx) // Use detached context
 	}
 
 	// Try to terminate any idle transactions
@@ -173,7 +177,7 @@ func (a *Alembic) Apply(ctx context.Context) error {
 		a.w.Warn("cannot terminate idle transactions", wool.ErrField(err))
 	} else {
 		terminateProc.WithOutput(a.w)
-		_ = terminateProc.Run(ctx) // Don't fail if this doesn't work
+		_ = terminateProc.Run(migrationCtx) // Use detached context
 	}
 
 	// Check final state
@@ -183,7 +187,7 @@ func (a *Alembic) Apply(ctx context.Context) error {
 		return a.w.Wrapf(err, "cannot create final check process")
 	}
 	finalProc.WithOutput(a.w)
-	err = finalProc.Run(ctx)
+	err = finalProc.Run(migrationCtx) // Use detached context
 	if err != nil {
 		return a.w.Wrapf(err, "cannot check final version")
 	}
@@ -276,16 +280,25 @@ func (a *Alembic) Apply(ctx context.Context) error {
 				// Migration ran but didn't create any tables - try to force commit again
 				a.w.Debug("alembic_version table exists but no application tables - trying to clean up transactions")
 
-				// Try to force commit one more time
-				commitAgainProc, _ := runner.NewProcess("psql", a.containerConnection, "-c", "COMMIT;")
-				commitAgainProc.WithOutput(a.w)
-				_ = commitAgainProc.Run(ctx)
+				// Try to check for transaction issues
+				a.w.Debug("checking for transaction issues")
 
-				// Check for any remaining active transactions
-				txCheckProc, _ := runner.NewProcess("psql", a.containerConnection, "-c",
+				// Check for active transactions one more time
+				txProc2, _ := runner.NewProcess("psql", a.containerConnection, "-c",
 					"SELECT count(*) FROM pg_stat_activity WHERE state LIKE '%transaction%';")
-				txCheckProc.WithOutput(a.w)
-				_ = txCheckProc.Run(ctx)
+				txProc2.WithOutput(a.w)
+				_ = txProc2.Run(migrationCtx) // Use detached context
+
+				// Try to force a transaction commit again
+				commitProc2, _ := runner.NewProcess("psql", a.containerConnection, "-c", "COMMIT;")
+				commitProc2.WithOutput(a.w)
+				_ = commitProc2.Run(migrationCtx) // Use detached context
+
+				// Try to explicitly terminate any idle transactions
+				killProc, _ := runner.NewProcess("psql", a.containerConnection, "-c",
+					"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle in transaction' AND pid <> pg_backend_pid();")
+				killProc.WithOutput(a.w)
+				_ = killProc.Run(migrationCtx) // Use detached context
 
 				// Check version records
 				var versions []string
