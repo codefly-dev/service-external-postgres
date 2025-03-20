@@ -144,6 +144,38 @@ func (a *Alembic) Apply(ctx context.Context) error {
 	}
 	a.w.Focus("upgrade process completed")
 
+	// Check for and attempt to commit any pending transactions
+	a.w.Debug("checking for active transactions")
+	txProc, err := runner.NewProcess("psql", a.containerConnection, "-c",
+		"SELECT pid, state, query, xact_start, now() - xact_start AS duration FROM pg_stat_activity WHERE state LIKE '%transaction%';")
+	if err != nil {
+		a.w.Warn("cannot check for active transactions", wool.ErrField(err))
+	} else {
+		txProc.WithOutput(a.w)
+		_ = txProc.Run(ctx) // Don't fail if this doesn't work
+	}
+
+	// Attempt to explicitly commit any pending transactions
+	a.w.Debug("attempting to commit any pending transactions")
+	commitProc, err := runner.NewProcess("psql", a.containerConnection, "-c", "COMMIT;")
+	if err != nil {
+		a.w.Warn("cannot run commit command", wool.ErrField(err))
+	} else {
+		commitProc.WithOutput(a.w)
+		_ = commitProc.Run(ctx) // Don't fail if this doesn't work
+	}
+
+	// Try to terminate any idle transactions
+	a.w.Debug("attempting to terminate any idle transactions")
+	terminateProc, err := runner.NewProcess("psql", a.containerConnection, "-c",
+		"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle in transaction' AND pid <> pg_backend_pid();")
+	if err != nil {
+		a.w.Warn("cannot terminate idle transactions", wool.ErrField(err))
+	} else {
+		terminateProc.WithOutput(a.w)
+		_ = terminateProc.Run(ctx) // Don't fail if this doesn't work
+	}
+
 	// Check final state
 	a.w.Focus("checking final migration state")
 	finalProc, err := runner.NewProcess("alembic", "-c", "/workspace/alembic.ini", "current")
@@ -158,20 +190,24 @@ func (a *Alembic) Apply(ctx context.Context) error {
 
 	a.w.Focus("checking tables in database")
 
-	// Check tables using native connection with retries
-	maxRetries := 5
-	retryDelay := time.Second * 2
+	// Check tables using native connection with retries for up to 1 minute
+	maxRetries := 12 // Try 12 times with 5-second intervals = 60 seconds total
+	retryDelay := time.Second * 5
 	var tables []string
 	var lastErr error
 
 	for i := 0; i < maxRetries; i++ {
 		if i > 0 {
-			a.w.Debug("retrying table check", wool.Field("attempt", i+1))
+			a.w.Debug("retrying table check", wool.Field("attempt", i+1), wool.Field("max_retries", maxRetries))
 			time.Sleep(retryDelay)
 		}
 
+		a.w.Debug("checking database for tables", wool.Field("attempt", i+1),
+			wool.Field("elapsed_time", time.Duration(i)*retryDelay),
+			wool.Field("timeout", time.Duration(maxRetries)*retryDelay))
 		db, err := sql.Open("postgres", a.nativeConnection)
 		if err != nil {
+			a.w.Debug("failed to open database connection", wool.Field("attempt", i+1), wool.ErrField(err))
 			lastErr = err
 			continue
 		}
@@ -180,6 +216,7 @@ func (a *Alembic) Apply(ctx context.Context) error {
 		// Test the connection
 		err = db.Ping()
 		if err != nil {
+			a.w.Debug("database ping failed", wool.Field("attempt", i+1), wool.ErrField(err))
 			lastErr = err
 			continue
 		}
@@ -218,10 +255,63 @@ func (a *Alembic) Apply(ctx context.Context) error {
 	// Log tables but don't fail if empty
 	a.w.Focus("tables in database", wool.Field("tables", tables))
 	if len(tables) == 0 {
-		if lastErr != nil {
-			return a.w.Wrapf(lastErr, "failed to check tables after %d attempts", maxRetries)
+		// Open a fresh connection to check for alembic_version
+		finalDb, finalErr := sql.Open("postgres", a.nativeConnection)
+		if finalErr != nil {
+			a.w.Debug("failed to open final database connection", wool.ErrField(finalErr))
+		} else {
+			defer finalDb.Close()
+
+			// Check for alembic_version table to see if migrations ran but didn't create tables
+			var hasAlembicVersion bool
+			vErr := finalDb.QueryRow(`
+				SELECT EXISTS (
+					SELECT FROM pg_tables
+					WHERE schemaname = 'public'
+					AND tablename = 'alembic_version'
+				)
+			`).Scan(&hasAlembicVersion)
+
+			if vErr == nil && hasAlembicVersion {
+				// Migration ran but didn't create any tables - try to force commit again
+				a.w.Debug("alembic_version table exists but no application tables - trying to clean up transactions")
+
+				// Try to force commit one more time
+				commitAgainProc, _ := runner.NewProcess("psql", a.containerConnection, "-c", "COMMIT;")
+				commitAgainProc.WithOutput(a.w)
+				_ = commitAgainProc.Run(ctx)
+
+				// Check for any remaining active transactions
+				txCheckProc, _ := runner.NewProcess("psql", a.containerConnection, "-c",
+					"SELECT count(*) FROM pg_stat_activity WHERE state LIKE '%transaction%';")
+				txCheckProc.WithOutput(a.w)
+				_ = txCheckProc.Run(ctx)
+
+				// Check version records
+				var versions []string
+				vRows, vRowErr := finalDb.Query("SELECT version_num FROM alembic_version")
+				if vRowErr == nil {
+					defer vRows.Close()
+					for vRows.Next() {
+						var v string
+						if vRows.Scan(&v) == nil {
+							versions = append(versions, v)
+						}
+					}
+				}
+
+				a.w.Warn("transaction issue detected: migrations completed (alembic_version exists) but no tables were created",
+					wool.Field("versions", versions),
+					wool.Field("max_wait_time", time.Duration(maxRetries)*retryDelay))
+
+				return a.w.Wrap(fmt.Errorf("transaction issue detected: alembic_version table exists (versions: %v) but no application tables were created after waiting %s - this is likely due to uncommitted transactions", versions, time.Duration(maxRetries)*retryDelay))
+			}
 		}
-		return a.w.Wrap(fmt.Errorf("no tables found in database after %d attempts: migrations failed", maxRetries))
+
+		if lastErr != nil {
+			return a.w.Wrapf(lastErr, "failed to check tables after %d attempts (waited %s)", maxRetries, time.Duration(maxRetries)*retryDelay)
+		}
+		return a.w.Wrap(fmt.Errorf("no tables found in database after waiting %s (%d attempts): migrations failed or are taking too long to commit", time.Duration(maxRetries)*retryDelay, maxRetries))
 	}
 	return nil
 }
