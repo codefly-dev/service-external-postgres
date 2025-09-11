@@ -144,41 +144,44 @@ func (a *Alembic) Apply(ctx context.Context) error {
 	a.w.Focus("running upgrade process")
 	err = proc.Run(migrationCtx) // Use the detached context
 	if err != nil {
+		// Only perform transaction cleanup if the migration failed
+		a.w.Debug("migration failed, attempting transaction cleanup")
+
+		// Check for and attempt to commit any pending transactions
+		a.w.Debug("checking for active transactions")
+		txProc, txErr := runner.NewProcess("psql", a.containerConnection, "-c",
+			"SELECT pid, state, query, xact_start, now() - xact_start AS duration FROM pg_stat_activity WHERE state LIKE '%transaction%';")
+		if txErr != nil {
+			a.w.Warn("cannot check for active transactions", wool.ErrField(txErr))
+		} else {
+			txProc.WithOutput(a.w)
+			_ = txProc.Run(migrationCtx) // Use detached context
+		}
+
+		// Attempt to explicitly commit any pending transactions
+		a.w.Debug("attempting to commit any pending transactions")
+		commitProc, commitErr := runner.NewProcess("psql", a.containerConnection, "-c", "COMMIT;")
+		if commitErr != nil {
+			a.w.Warn("cannot run commit command", wool.ErrField(commitErr))
+		} else {
+			commitProc.WithOutput(a.w)
+			_ = commitProc.Run(migrationCtx) // Use detached context
+		}
+
+		// Try to terminate any idle transactions
+		a.w.Debug("attempting to terminate any idle transactions")
+		terminateProc, terminateErr := runner.NewProcess("psql", a.containerConnection, "-c",
+			"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle in transaction' AND pid <> pg_backend_pid();")
+		if terminateErr != nil {
+			a.w.Warn("cannot terminate idle transactions", wool.ErrField(terminateErr))
+		} else {
+			terminateProc.WithOutput(a.w)
+			_ = terminateProc.Run(migrationCtx) // Use detached context
+		}
+
 		return a.w.Wrapf(err, "alembic upgrade failed")
 	}
 	a.w.Focus("upgrade process completed")
-
-	// Check for and attempt to commit any pending transactions
-	a.w.Debug("checking for active transactions")
-	txProc, err := runner.NewProcess("psql", a.containerConnection, "-c",
-		"SELECT pid, state, query, xact_start, now() - xact_start AS duration FROM pg_stat_activity WHERE state LIKE '%transaction%';")
-	if err != nil {
-		a.w.Warn("cannot check for active transactions", wool.ErrField(err))
-	} else {
-		txProc.WithOutput(a.w)
-		_ = txProc.Run(migrationCtx) // Use detached context
-	}
-
-	// Attempt to explicitly commit any pending transactions
-	a.w.Debug("attempting to commit any pending transactions")
-	commitProc, err := runner.NewProcess("psql", a.containerConnection, "-c", "COMMIT;")
-	if err != nil {
-		a.w.Warn("cannot run commit command", wool.ErrField(err))
-	} else {
-		commitProc.WithOutput(a.w)
-		_ = commitProc.Run(migrationCtx) // Use detached context
-	}
-
-	// Try to terminate any idle transactions
-	a.w.Debug("attempting to terminate any idle transactions")
-	terminateProc, err := runner.NewProcess("psql", a.containerConnection, "-c",
-		"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle in transaction' AND pid <> pg_backend_pid();")
-	if err != nil {
-		a.w.Warn("cannot terminate idle transactions", wool.ErrField(err))
-	} else {
-		terminateProc.WithOutput(a.w)
-		_ = terminateProc.Run(migrationCtx) // Use detached context
-	}
 
 	// Check final state
 	a.w.Focus("checking final migration state")
@@ -195,8 +198,8 @@ func (a *Alembic) Apply(ctx context.Context) error {
 	a.w.Focus("checking tables in database")
 
 	// Check tables using native connection with retries for up to 1 minute
-	maxRetries := 12 // Try 12 times with 5-second intervals = 60 seconds total
-	retryDelay := time.Second * 5
+	maxRetries := 12 // Try 12 times with 10-second intervals = 120 seconds total
+	retryDelay := time.Second * 10
 	var tables []string
 	var lastErr error
 
@@ -277,30 +280,7 @@ func (a *Alembic) Apply(ctx context.Context) error {
 			`).Scan(&hasAlembicVersion)
 
 			if vErr == nil && hasAlembicVersion {
-				// Migration ran but didn't create any tables - try to force commit again
-				a.w.Debug("alembic_version table exists but no application tables - trying to clean up transactions")
-
-				// Try to check for transaction issues
-				a.w.Debug("checking for transaction issues")
-
-				// Check for active transactions one more time
-				txProc2, _ := runner.NewProcess("psql", a.containerConnection, "-c",
-					"SELECT count(*) FROM pg_stat_activity WHERE state LIKE '%transaction%';")
-				txProc2.WithOutput(a.w)
-				_ = txProc2.Run(migrationCtx) // Use detached context
-
-				// Try to force a transaction commit again
-				commitProc2, _ := runner.NewProcess("psql", a.containerConnection, "-c", "COMMIT;")
-				commitProc2.WithOutput(a.w)
-				_ = commitProc2.Run(migrationCtx) // Use detached context
-
-				// Try to explicitly terminate any idle transactions
-				killProc, _ := runner.NewProcess("psql", a.containerConnection, "-c",
-					"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle in transaction' AND pid <> pg_backend_pid();")
-				killProc.WithOutput(a.w)
-				_ = killProc.Run(migrationCtx) // Use detached context
-
-				// Check version records
+				// Check version records to provide better error information
 				var versions []string
 				vRows, vRowErr := finalDb.Query("SELECT version_num FROM alembic_version")
 				if vRowErr == nil {
@@ -313,11 +293,11 @@ func (a *Alembic) Apply(ctx context.Context) error {
 					}
 				}
 
-				a.w.Warn("transaction issue detected: migrations completed (alembic_version exists) but no tables were created",
+				a.w.Warn("migration completed but no application tables found",
 					wool.Field("versions", versions),
 					wool.Field("max_wait_time", time.Duration(maxRetries)*retryDelay))
 
-				return a.w.Wrap(fmt.Errorf("transaction issue detected: alembic_version table exists (versions: %v) but no application tables were created after waiting %s - this is likely due to uncommitted transactions", versions, time.Duration(maxRetries)*retryDelay))
+				return a.w.Wrap(fmt.Errorf("migration completed (alembic_version exists with versions: %v) but no application tables were created after waiting %s - this may indicate the migration files don't create any tables or there was a transaction issue", versions, time.Duration(maxRetries)*retryDelay))
 			}
 		}
 
