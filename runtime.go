@@ -13,7 +13,6 @@ import (
 	"github.com/codefly-dev/core/agents/services"
 	"github.com/codefly-dev/core/wool"
 
-	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
 	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
 	"github.com/codefly-dev/core/resources"
 	runners "github.com/codefly-dev/core/runners/base"
@@ -22,6 +21,7 @@ import (
 )
 
 type Runtime struct {
+	services.RuntimeServer
 	*Service
 
 	// internal
@@ -52,7 +52,7 @@ func (s *Runtime) Load(ctx context.Context, req *runtimev0.LoadRequest) (*runtim
 	requirements.Localize(s.Location)
 
 	// Endpoints
-	s.Endpoints, err = s.Runtime.Service.LoadEndpoints(ctx)
+	s.Endpoints, err = s.Base.Service.LoadEndpoints(ctx)
 	if err != nil {
 		return s.Runtime.LoadErrorf(err, "cannot load endpoints")
 	}
@@ -237,10 +237,6 @@ func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtim
 
 	s.Wool.Debug("nothing to stop: keep environment alive")
 
-	err := s.Base.Stop()
-	if err != nil {
-		return s.Runtime.StopError(err)
-	}
 	return s.Runtime.StopResponse()
 }
 
@@ -265,10 +261,6 @@ func (s *Runtime) Destroy(ctx context.Context, req *runtimev0.DestroyRequest) (*
 
 func (s *Runtime) Test(ctx context.Context, req *runtimev0.TestRequest) (*runtimev0.TestResponse, error) {
 	return s.Runtime.TestResponse()
-}
-
-func (s *Runtime) Communicate(ctx context.Context, req *agentv0.Engage) (*agentv0.InformationRequest, error) {
-	return s.Base.Communicate(ctx, req)
 }
 
 /* Details

@@ -10,9 +10,6 @@ import (
 	"github.com/codefly-dev/core/standards"
 	"github.com/codefly-dev/core/wool"
 
-	"github.com/codefly-dev/core/agents/communicate"
-	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
-
 	"github.com/codefly-dev/core/agents/services"
 	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 	"github.com/codefly-dev/core/shared"
@@ -20,6 +17,7 @@ import (
 )
 
 type Builder struct {
+	services.BuilderServer
 	*Service
 }
 
@@ -53,17 +51,10 @@ func (s *Builder) Load(ctx context.Context, req *builderv0.LoadRequest) (*builde
 		if err != nil {
 			return nil, err
 		}
-		if req.CreationMode.Communicate {
-			// communication on CreateResponse
-			err = s.Communication.Register(ctx, communicate.New[builderv0.CreateRequest](s.createCommunicate()))
-			if err != nil {
-				return s.Builder.LoadError(err)
-			}
-		}
 		return s.Builder.LoadResponse()
 	}
 
-	s.Endpoints, err = s.Builder.Service.LoadEndpoints(ctx)
+	s.Endpoints, err = s.Base.Service.LoadEndpoints(ctx)
 	if err != nil {
 		return s.Builder.LoadError(err)
 	}
@@ -191,7 +182,11 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 		return s.Builder.DeployResponse()
 	}
 
-	cm, err := services.EnvsAsConfigMapData(s.EnvironmentVariables.Configurations()...)
+	configs, err := s.EnvironmentVariables.Configurations()
+	if err != nil {
+		return s.Builder.DeployError(err)
+	}
+	cm, err := services.EnvsAsConfigMapData(configs...)
 	if err != nil {
 		return s.Builder.DeployError(err)
 	}
@@ -216,18 +211,6 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	return s.Builder.DeployResponse()
 }
 
-func (s *Builder) Options() []*agentv0.Question {
-	return []*agentv0.Question{
-		communicate.NewConfirm(&agentv0.Message{Name: HotReload, Message: "Migration hot-reload (Recommended)?", Description: "codefly can restart your database when migration changes detected 🔎"}, true),
-		communicate.NewStringInput(&agentv0.Message{Name: DatabaseName, Message: "Name of the database?", Description: "Ensure encapsulation of your data"},
-			s.Base.Identity.Module),
-	}
-}
-
-func (s *Builder) createCommunicate() *communicate.Sequence {
-	return communicate.NewSequence(s.Options()...)
-}
-
 type create struct {
 	DatabaseName string
 	TableName    string
@@ -236,32 +219,12 @@ type create struct {
 func (s *Builder) Create(ctx context.Context, req *builderv0.CreateRequest) (*builderv0.CreateResponse, error) {
 	defer s.Wool.Catch()
 
-	if s.Builder.CreationMode.Communicate {
-		s.Wool.Debug("using communicate mode")
-		session, err := s.Communication.Done(ctx, communicate.Channel[builderv0.CreateRequest]())
-
-		if err != nil {
-			return s.Builder.CreateError(err)
-		}
-
-		s.Settings.DatabaseName, err = session.GetInputString(DatabaseName)
-		if err != nil {
-			return s.Builder.CreateError(err)
-		}
-	} else {
-		options := s.Options()
-		var err error
-
-		s.Settings.HotReload, err = communicate.GetDefaultConfirm(options, HotReload)
-		if err != nil {
-			return s.Builder.CreateError(err)
-		}
-
-		s.Settings.DatabaseName, err = communicate.GetDefaultStringInput(options, DatabaseName)
-		if err != nil {
-			return s.Builder.CreateError(err)
-		}
+	// Use defaults
+	s.Settings.HotReload = true
+	if s.Settings.DatabaseName == "" {
+		s.Settings.DatabaseName = s.Base.Identity.Module
 	}
+
 	c := create{DatabaseName: s.Settings.DatabaseName, TableName: s.Builder.Service.Name}
 
 	err := s.Templates(ctx, c, services.WithFactory(factoryFS))

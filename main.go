@@ -139,10 +139,12 @@ func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev
 }
 
 func main() {
-	agents.Register(
-		services.NewServiceAgent(agent.Of(resources.ServiceAgent), NewService()),
-		services.NewBuilderAgent(agent.Of(resources.RuntimeServiceAgent), NewBuilder()),
-		services.NewRuntimeAgent(agent.Of(resources.BuilderServiceAgent), NewRuntime()))
+	svc := NewService()
+	agents.Serve(agents.PluginRegistration{
+		Agent:   svc,
+		Runtime: NewRuntime(),
+		Builder: NewBuilder(),
+	})
 }
 
 //go:embed agent.codefly.yaml
