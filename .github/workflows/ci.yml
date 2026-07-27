@@ -115,3 +115,13 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ghcr.io/codefly-dev/service-postgres:${{ steps.image.outputs.tag }}
+
+      - name: Set up Go
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+
+      - name: Test agent lifecycle against published image
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+        run: go test ./...
