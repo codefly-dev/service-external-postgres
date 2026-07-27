@@ -22,23 +22,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Check out release source
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ inputs.tag }}
+          path: release-source
       - name: Validate tag
         env:
           RELEASE_TAG: ${{ inputs.tag }}
-        run: test "$(git describe --tags --exact-match)" = "$RELEASE_TAG"
+        run: .github/scripts/release-backfill.sh validate-tag release-source
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: release-source/go.mod
+          cache-dependency-path: release-source/go.sum
       - name: Repair dependency metadata
         run: |
-          cp go.mod "${{ runner.temp }}/release.mod"
-          cp go.sum "${{ runner.temp }}/release.sum"
+          cp release-source/go.mod "${{ runner.temp }}/release.mod"
+          cp release-source/go.sum "${{ runner.temp }}/release.sum"
+          cd release-source
           go mod tidy -modfile="${{ runner.temp }}/release.mod"
       - name: Test
         run: go test -v ./...
+        working-directory: release-source
         env:
           GOFLAGS: -modfile=${{ runner.temp }}/release.mod
       - name: Run GoReleaser
@@ -46,17 +52,11 @@ jobs:
         with:
           version: '~> v2'
           args: release --clean --skip=publish,announce
+          workdir: release-source
         env:
           GOFLAGS: -modfile=${{ runner.temp }}/release.mod
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
           RELEASE_TAG: ${{ inputs.tag }}
-        run: |
-          gh release create "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --latest=false \
-            --title "$RELEASE_TAG" \
-            --notes-file dist/CHANGELOG.md \
-            dist/*.tar.gz dist/*_checksums.txt
+        run: .github/scripts/release-backfill.sh publish release-source/dist
