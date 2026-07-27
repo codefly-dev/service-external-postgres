@@ -4,8 +4,59 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to rebuild and publish
+        required: true
+        type: string
 
 jobs:
   release:
+    if: github.event_name == 'push'
     uses: codefly-dev/core/.github/workflows/go-service-release.yml@main
     secrets: inherit
+
+  backfill:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag }}
+      - name: Validate tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: test "$(git describe --tags --exact-match)" = "$RELEASE_TAG"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Repair dependency metadata
+        run: |
+          cp go.mod "${{ runner.temp }}/release.mod"
+          cp go.sum "${{ runner.temp }}/release.sum"
+          go mod tidy -modfile="${{ runner.temp }}/release.mod"
+      - name: Test
+        run: go test -v ./...
+        env:
+          GOFLAGS: -modfile=${{ runner.temp }}/release.mod
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: '~> v2'
+          args: release --clean --skip=publish,announce
+        env:
+          GOFLAGS: -modfile=${{ runner.temp }}/release.mod
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --latest=false \
+            --title "$RELEASE_TAG" \
+            --notes-file dist/CHANGELOG.md \
+            dist/*.tar.gz dist/*_checksums.txt
