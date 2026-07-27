@@ -98,17 +98,12 @@ type MigrationSource struct {
 const HotReload = "hot-reload"
 const DatabaseName = "database-name"
 
-// pgvector/pgvector:pg17 is the official Postgres 17 image with the pgvector
-// extension preinstalled (same docker-entrypoint as the stock postgres image,
-// so the full contrib set — pgcrypto, uuid-ossp, pg_trgm, citext, btree_gin, …
-// — is available too). Required so `CREATE EXTENSION vector` works — consumers
-// like Mind's knowledge-graph migration (vector(1024) column) depend on it. The
-// nix runtime gets pgvector via nix/flake.nix; this keeps both runtimes at
-// parity. Override per-service via Settings.DockerImage (e.g. for PostGIS).
+// The managed image adds pgvector to the official Postgres 17 Alpine image
+// while preserving its entrypoint and contrib extensions. The nix runtime gets
+// pgvector via nix/flake.nix, keeping both runtimes at parity.
 var image = &resources.DockerImage{
-	Name:   "pgvector/pgvector",
-	Tag:    "pg17",
-	Digest: "sha256:d2ef61f42ef767baa5a1475393303cc235bcd92febd9d7014eddb48b41f3bad0",
+	Name: "ghcr.io/codefly-dev/service-postgres",
+	Tag:  "runtime-9ae3b680a1cbf2d3",
 }
 
 type DeploymentTemplateParameters struct {

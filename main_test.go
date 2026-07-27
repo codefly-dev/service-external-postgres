@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
@@ -24,6 +25,15 @@ import (
 
 // TODO: Add tests
 // - migrations: up/down
+
+func TestDefaultImageUsesHardenedRuntime(t *testing.T) {
+	dockerfile, err := os.ReadFile("Dockerfile")
+	require.NoError(t, err)
+	sum := sha256.Sum256(dockerfile)
+	require.Equal(t, fmt.Sprintf(
+		"ghcr.io/codefly-dev/service-postgres:runtime-%x", sum[:8],
+	), image.FullName())
+}
 
 // TestCreateToRunDocker runs the full agent lifecycle against the explicitly
 // selected container backend. Using free here would only test backend

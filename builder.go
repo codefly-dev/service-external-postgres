@@ -67,9 +67,7 @@ func (s *Builder) Sync(ctx context.Context, req *builderv0.SyncRequest) (*builde
 	return s.Builder.SyncResponse()
 }
 
-// Audit scans the postgres image for known CVEs (HIGH/CRITICAL) via
-// trivy. The image tag comes from the package-level `image` var
-// (postgres:16.1-alpine by default).
+// Audit scans the configured postgres image for known HIGH/CRITICAL CVEs.
 func (s *Builder) Audit(ctx context.Context, req *builderv0.AuditRequest) (*builderv0.AuditResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
@@ -82,10 +80,7 @@ func (s *Builder) SBOM(ctx context.Context, _ *builderv0.SBOMRequest) (*builderv
 	return s.Builder.SBOMContainer(ctx, s.dockerImage().FullName())
 }
 
-// Upgrade reports a tag bump from the current postgres image (e.g.
-// 16.1-alpine → 16.4 within major 16; or 17.0 if --major). Persisting
-// the new tag is left to the caller — postgres has no lockfile to
-// rewrite, the image var lives in the agent code.
+// Upgrade reports an available tag bump for the managed postgres image.
 func (s *Builder) Upgrade(ctx context.Context, req *builderv0.UpgradeRequest) (*builderv0.UpgradeResponse, error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)

@@ -10,6 +10,117 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   ci:
+    needs: image
     uses: codefly-dev/core/.github/workflows/go-service-ci.yml@main
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Resolve runtime image tag
+        id: image
+        run: echo "tag=runtime-$(sha256sum Dockerfile | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Build runtime image
+        run: docker build --tag service-postgres:test .
+
+      - name: Smoke test runtime image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cleanup() {
+            docker rm -f service-postgres-root service-postgres-nonroot >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          smoke() {
+            local container_name="$1"
+            shift
+            docker run --detach --name "$container_name" "$@" \
+              --env POSTGRES_PASSWORD=test service-postgres:test >/dev/null
+
+            local ready=false
+            for _ in $(seq 1 60); do
+              local state
+              local ready_count
+              state=$(docker inspect --format '{{.State.Status}}' "$container_name")
+              ready_count=$(docker logs "$container_name" 2>&1 |
+                grep -c 'database system is ready to accept connections' || true)
+              if [[ "$ready_count" -ge 2 ]] &&
+                docker exec "$container_name" pg_isready -U postgres >/dev/null 2>&1; then
+                ready=true
+                break
+              fi
+              if [[ "$state" != running ]]; then
+                break
+              fi
+              sleep 1
+            done
+
+            if [[ "$ready" != true ]]; then
+              docker logs "$container_name"
+              return 1
+            fi
+
+            docker exec "$container_name" psql \
+              -v ON_ERROR_STOP=1 -U postgres -d postgres \
+              -c "CREATE EXTENSION vector" \
+              -c "SELECT round(('[1,2,3]'::vector <-> '[4,5,6]'::vector)::numeric, 6)"
+            docker rm -f "$container_name" >/dev/null
+          }
+
+          smoke service-postgres-root
+          smoke service-postgres-nonroot \
+            --user 70:70 \
+            --tmpfs /var/lib/postgresql/data:uid=70,gid=70
+
+      - name: Scan runtime image
+        run: |
+          docker save --output /tmp/service-postgres-image.tar service-postgres:test
+          mkdir -p /tmp/trivy-cache
+          docker run --rm \
+            --volume /tmp/trivy-cache:/root/.cache/trivy \
+            --volume /tmp/service-postgres-image.tar:/image.tar:ro \
+            aquasec/trivy@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f \
+            image --quiet --format table --severity HIGH,CRITICAL \
+            --exit-code 1 --input /image.tar
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+
+      - if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - name: Publish runtime image for agent tests
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/codefly-dev/service-postgres:${{ steps.image.outputs.tag }}
+
+      - name: Make runtime image public
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --method PATCH \
+            /orgs/codefly-dev/packages/container/service-postgres \
+            --field visibility=public
