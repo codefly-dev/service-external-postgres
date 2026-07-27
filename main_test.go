@@ -32,7 +32,11 @@ func TestDefaultImageUsesHardenedRuntime(t *testing.T) {
 	sum := sha256.Sum256(dockerfile)
 	require.Equal(t, fmt.Sprintf(
 		"ghcr.io/codefly-dev/service-postgres:runtime-%x", sum[:8],
-	), image.FullName())
+	), image.Name+":"+image.Tag)
+	require.Equal(t,
+		"sha256:22499f49815f37adc9118b9028fffba71b49e64bf293cbf08b445042e55d8b65",
+		image.Digest,
+	)
 }
 
 // TestCreateToRunDocker runs the full agent lifecycle against the explicitly

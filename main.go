@@ -102,8 +102,9 @@ const DatabaseName = "database-name"
 // while preserving its entrypoint and contrib extensions. The nix runtime gets
 // pgvector via nix/flake.nix, keeping both runtimes at parity.
 var image = &resources.DockerImage{
-	Name: "ghcr.io/codefly-dev/service-postgres",
-	Tag:  "runtime-9ae3b680a1cbf2d3",
+	Name:   "ghcr.io/codefly-dev/service-postgres",
+	Tag:    "runtime-9ae3b680a1cbf2d3",
+	Digest: "sha256:22499f49815f37adc9118b9028fffba71b49e64bf293cbf08b445042e55d8b65",
 }
 
 type DeploymentTemplateParameters struct {

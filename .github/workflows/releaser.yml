@@ -41,14 +41,6 @@ jobs:
             ghcr.io/codefly-dev/service-postgres:postgres-17.10-pgvector-0.8.5-alpine3.24
             ghcr.io/codefly-dev/service-postgres:${{ steps.image.outputs.tag }}
 
-      - name: Make runtime image public
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh api --method PATCH \
-            /orgs/codefly-dev/packages/container/service-postgres \
-            --field visibility=public
-
   release:
     needs: image
     uses: codefly-dev/core/.github/workflows/go-service-release.yml@main

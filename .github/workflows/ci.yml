@@ -115,12 +115,3 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ghcr.io/codefly-dev/service-postgres:${{ steps.image.outputs.tag }}
-
-      - name: Make runtime image public
-        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh api --method PATCH \
-            /orgs/codefly-dev/packages/container/service-postgres \
-            --field visibility=public
