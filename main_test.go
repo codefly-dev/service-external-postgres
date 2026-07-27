@@ -34,7 +34,7 @@ func TestDefaultImageUsesHardenedRuntime(t *testing.T) {
 		"ghcr.io/codefly-dev/service-postgres:runtime-%x", sum[:8],
 	), image.Name+":"+image.Tag)
 	require.Equal(t,
-		"sha256:22499f49815f37adc9118b9028fffba71b49e64bf293cbf08b445042e55d8b65",
+		"sha256:a5bb05518fd2f054884282f389577028c6304337bcf9d65363810ef1ad9e8c6c",
 		image.Digest,
 	)
 }

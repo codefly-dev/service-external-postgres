@@ -104,7 +104,7 @@ const DatabaseName = "database-name"
 var image = &resources.DockerImage{
 	Name:   "ghcr.io/codefly-dev/service-postgres",
 	Tag:    "runtime-9ae3b680a1cbf2d3",
-	Digest: "sha256:22499f49815f37adc9118b9028fffba71b49e64bf293cbf08b445042e55d8b65",
+	Digest: "sha256:a5bb05518fd2f054884282f389577028c6304337bcf9d65363810ef1ad9e8c6c",
 }
 
 type DeploymentTemplateParameters struct {
