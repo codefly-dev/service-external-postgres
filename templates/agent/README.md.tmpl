@@ -9,4 +9,6 @@ The migration owner is private to the Postgres service and its bootstrap job. It
 
 The bootstrap job applies migrations and reconciles runtime roles and grants on every deployment. Local Docker and Nix runtimes enforce the same contract.
 
+Local database state survives ordinary stop/start and container recreation. In Docker mode, the agent mounts the official image's data directory from a Codefly-owned persistent runtime directory scoped by workspace, service, and naming scope. Stable and development scopes therefore keep independent databases even when they run from the same checkout.
+
 For tenant isolation, application migrations must enable row-level security and define policies against transaction-local tenant/user settings. Go services should use the service-owned library at `github.com/codefly-dev/service-postgres/libs/go`, which resolves an authenticated principal from context, issues separate read-only/read-write stores without exposing raw pools, and provides tenant-scoped transaction advisory locks without exposing tenant identity to repository code.

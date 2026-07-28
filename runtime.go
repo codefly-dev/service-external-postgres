@@ -19,6 +19,20 @@ import (
 	_ "github.com/lib/pq"
 )
 
+const (
+	postgresDataCacheKey  = "postgres-data"
+	postgresDataDirectory = "/var/lib/postgresql/data"
+)
+
+type persistentCacheMounter interface {
+	WithPersistentCacheMount(context.Context, string, string) (string, error)
+}
+
+func mountPersistentPostgresData(ctx context.Context, runner persistentCacheMounter) error {
+	_, err := runner.WithPersistentCacheMount(ctx, postgresDataCacheKey, postgresDataDirectory)
+	return err
+}
+
 type Runtime struct {
 	services.RuntimeServer
 	*Service
@@ -156,6 +170,9 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	runner, err := dockerrun.NewDockerHeadlessEnvironment(ctx, s.dockerImage(), s.UniqueWithWorkspace())
 	if err != nil {
 		return s.Runtime.InitError(err)
+	}
+	if err = mountPersistentPostgresData(ctx, runner); err != nil {
+		return s.Runtime.InitError(s.Wool.Wrapf(err, "cannot configure persistent postgres data"))
 	}
 
 	runner.WithOutput(newPGLogWriter(s.Wool))
