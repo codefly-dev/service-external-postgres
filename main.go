@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"net/url"
 	"strings"
 
@@ -101,10 +104,38 @@ const DatabaseName = "database-name"
 // The managed image adds pgvector to the official Postgres 17 Alpine image
 // while preserving its entrypoint and contrib extensions. The nix runtime gets
 // pgvector via nix/flake.nix, keeping both runtimes at parity.
-var image = &resources.DockerImage{
-	Name:   "ghcr.io/codefly-dev/service-postgres",
-	Tag:    "runtime-9ae3b680a1cbf2d3",
-	Digest: "sha256:a5bb05518fd2f054884282f389577028c6304337bcf9d65363810ef1ad9e8c6c",
+var image = shared.Must(parseRuntimeImageLock(runtimeImageLockJSON))
+
+type runtimeImageLock struct {
+	Name   string `json:"name"`
+	Tag    string `json:"tag"`
+	Digest string `json:"digest"`
+}
+
+func parseRuntimeImageLock(content []byte) (*resources.DockerImage, error) {
+	var lock runtimeImageLock
+	if err := json.Unmarshal(content, &lock); err != nil {
+		return nil, fmt.Errorf("parse runtime image lock: %w", err)
+	}
+	if lock.Name == "" {
+		return nil, fmt.Errorf("runtime image name is required")
+	}
+	if lock.Tag == "" {
+		return nil, fmt.Errorf("runtime image tag is required")
+	}
+	if lock.Digest == "" {
+		return nil, fmt.Errorf("runtime image digest is required")
+	}
+	algorithm, encoded, found := strings.Cut(lock.Digest, ":")
+	decoded, err := hex.DecodeString(encoded)
+	if !found || algorithm != "sha256" || err != nil || len(decoded) != 32 {
+		return nil, fmt.Errorf("runtime image digest must be a sha256 digest")
+	}
+	return &resources.DockerImage{
+		Name:   lock.Name,
+		Tag:    lock.Tag,
+		Digest: lock.Digest,
+	}, nil
 }
 
 type DeploymentTemplateParameters struct {
@@ -288,3 +319,6 @@ var infoFS embed.FS
 
 //go:embed templates/agent
 var readmeFS embed.FS
+
+//go:embed runtime-image.json
+var runtimeImageLockJSON []byte

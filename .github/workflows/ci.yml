@@ -12,24 +12,47 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   ci:
     needs: image
-    uses: codefly-dev/core/.github/workflows/go-service-ci.yml@main
+    permissions:
+      contents: read
+    uses: codefly-dev/core/.github/workflows/go-service-ci.yml@25e267bc5b7e346ef6b8439c9a032f115c4795a6
 
   image:
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
-      - name: Resolve runtime image tag
-        id: image
-        run: echo "tag=runtime-$(sha256sum Dockerfile | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - name: Resolve runtime image
+        id: runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          name=$(jq -er '.name' runtime-image.json)
+          tag=$(jq -er '.tag' runtime-image.json)
+          digest=$(jq -er '.digest' runtime-image.json)
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "reference=$name@$digest" >> "$GITHUB_OUTPUT"
+          echo "tag_reference=$name:$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          cache: false
+          go-version-file: go.mod
+
+      - name: Run unit tests
+        run: go test ./... -skip '^TestCreateToRunDocker$'
 
       - name: Build runtime image
-        run: docker build --tag service-postgres:test .
+        run: docker build --build-arg SOURCE_DATE_EPOCH=0 --tag service-postgres:test .
 
       - name: Smoke test runtime image
         shell: bash
@@ -82,17 +105,6 @@ jobs:
             --user 70:70 \
             --tmpfs /var/lib/postgresql/data:uid=70,gid=70
 
-      - name: Scan runtime image
-        run: |
-          docker save --output /tmp/service-postgres-image.tar service-postgres:test
-          mkdir -p /tmp/trivy-cache
-          docker run --rm \
-            --volume /tmp/trivy-cache:/root/.cache/trivy \
-            --volume /tmp/service-postgres-image.tar:/image.tar:ro \
-            aquasec/trivy@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f \
-            image --quiet --format table --severity HIGH,CRITICAL \
-            --exit-code 1 --input /image.tar
-
       - name: Log in to GitHub Container Registry
         if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
@@ -101,40 +113,77 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check for published runtime image
-        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-        id: published
-        env:
-          RUNTIME_IMAGE: ghcr.io/codefly-dev/service-postgres:${{ steps.image.outputs.tag }}
-        run: |
-          if docker manifest inspect "$RUNTIME_IMAGE" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - if: (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && steps.published.outputs.exists != 'true'
+      - if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
 
-      - if: (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && steps.published.outputs.exists != 'true'
+      - if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+        with:
+          driver-opts: image=moby/buildkit@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec
 
-      - name: Publish runtime image for agent tests
-        if: (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && steps.published.outputs.exists != 'true'
+      - name: Publish runtime image candidate
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+        id: candidate
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
+          build-args: SOURCE_DATE_EPOCH=0
           context: .
+          outputs: type=image,name=${{ steps.runtime.outputs.name }},push-by-digest=true,name-canonical=true,push=true,rewrite-timestamp=true
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ghcr.io/codefly-dev/service-postgres:${{ steps.image.outputs.tag }}
+          provenance: false
+          sbom: false
 
-      - name: Set up Go
+      - name: Verify runtime image candidate
         if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
-        with:
-          cache: false
-          go-version-file: go.mod
+        env:
+          ACTUAL_DIGEST: ${{ steps.candidate.outputs.digest }}
+          EXPECTED_DIGEST: ${{ steps.runtime.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ "$ACTUAL_DIGEST" != "$EXPECTED_DIGEST" ]]; then
+            echo "built digest $ACTUAL_DIGEST does not match runtime-image.json $EXPECTED_DIGEST" >&2
+            exit 1
+          fi
 
-      - name: Run unit tests
+      - name: Verify published runtime image
+        env:
+          RUNTIME_IMAGE: ${{ steps.runtime.outputs.reference }}
+        run: |
+          set -euo pipefail
+          anonymous_docker_config=$(mktemp -d)
+          trap 'rm -rf -- "$anonymous_docker_config"' EXIT
+          manifest=$(docker --config "$anonymous_docker_config" manifest inspect "$RUNTIME_IMAGE")
+          jq -e '
+            [.manifests[].platform | "\(.os)/\(.architecture)"] | sort ==
+            ["linux/amd64", "linux/arm64"]
+          ' <<< "$manifest"
+          docker --config "$anonymous_docker_config" pull "$RUNTIME_IMAGE"
+
+      - name: Scan published runtime image
+        env:
+          RUNTIME_IMAGE: ${{ steps.runtime.outputs.reference }}
+        run: |
+          docker save --output /tmp/service-postgres-image.tar "$RUNTIME_IMAGE"
+          mkdir -p /tmp/trivy-cache
+          docker run --rm \
+            --volume /tmp/trivy-cache:/root/.cache/trivy \
+            --volume /tmp/service-postgres-image.tar:/image.tar:ro \
+            aquasec/trivy@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f \
+            image --quiet --format table --severity HIGH,CRITICAL \
+            --exit-code 1 --input /image.tar
+
+      - name: Tag verified runtime image
         if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-        run: go test ./... -skip '^TestCreateToRunDocker$'
+        env:
+          EXPECTED_DIGEST: ${{ steps.runtime.outputs.digest }}
+          RUNTIME_IMAGE: ${{ steps.runtime.outputs.reference }}
+          RUNTIME_TAG: ${{ steps.runtime.outputs.tag_reference }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --tag "$RUNTIME_TAG" "$RUNTIME_IMAGE"
+          tagged_digest=$(docker buildx imagetools inspect "$RUNTIME_TAG" |
+            awk '$1 == "Digest:" { print $2; exit }')
+          if [[ "$tagged_digest" != "$EXPECTED_DIGEST" ]]; then
+            echo "tagged digest $tagged_digest does not match $EXPECTED_DIGEST" >&2
+            exit 1
+          fi

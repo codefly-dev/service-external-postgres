@@ -12,20 +12,21 @@ on:
         type: string
 
 permissions:
-  contents: write
-  id-token: write
-  packages: write
+  contents: read
 
 jobs:
   image:
     if: github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
-
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+        with:
+          driver-opts: image=moby/buildkit@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec
 
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
@@ -33,29 +34,45 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publish runtime image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/codefly-dev/service-postgres:${{ github.ref_name }}
-            ghcr.io/codefly-dev/service-postgres:postgres-17.10-pgvector-0.8.5-alpine3.24
+      - name: Publish release image tags
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          name=$(jq -er '.name' runtime-image.json)
+          tag=$(jq -er '.tag' runtime-image.json)
+          digest=$(jq -er '.digest' runtime-image.json)
+          RUNTIME_IMAGE="$name@$digest"
+          docker buildx imagetools create \
+            --tag "$name:$RELEASE_TAG" \
+            --tag "$name:$tag" \
+            "$RUNTIME_IMAGE"
+          for published_tag in "$name:$RELEASE_TAG" "$name:$tag"; do
+            published_digest=$(docker buildx imagetools inspect "$published_tag" |
+              awk '$1 == "Digest:" { print $2; exit }')
+            if [[ "$published_digest" != "$digest" ]]; then
+              echo "$published_tag resolves to $published_digest, want $digest" >&2
+              exit 1
+            fi
+          done
 
   release:
     if: github.event_name == 'push'
     needs: image
-    uses: codefly-dev/core/.github/workflows/go-service-release.yml@main
+    permissions:
+      contents: read
+    uses: codefly-dev/core/.github/workflows/go-service-release.yml@25e267bc5b7e346ef6b8439c9a032f115c4795a6
     secrets: inherit
 
   backfill:
     if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Check out release source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
           ref: ${{ inputs.tag }}
@@ -64,7 +81,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.tag }}
         run: .github/scripts/release-backfill.sh validate-tag release-source
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version-file: release-source/go.mod
           cache-dependency-path: release-source/go.sum
@@ -80,7 +97,7 @@ jobs:
         env:
           GOFLAGS: -modfile=${{ runner.temp }}/release.mod
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a
         with:
           version: '~> v2'
           args: release --clean --skip=publish,announce
