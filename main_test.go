@@ -266,4 +266,78 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 	require.NoError(t, err)
 	require.False(t, found, "tenant-b workload must not see tenant-a data")
 	require.Error(t, repository.Put(workloadB.Context(ctx), "blocked", "value"), "read-only workload must not obtain a writer")
+
+	if runtimeContext.Kind == resources.RuntimeContextContainer {
+		assertDockerStateSurvivesContainerRecreation(
+			t,
+			ctx,
+			runtime,
+			identity,
+			env,
+			conf,
+			networkMappings,
+			serviceName,
+			fixtureID,
+		)
+	}
+}
+
+func assertDockerStateSurvivesContainerRecreation(
+	t *testing.T,
+	ctx context.Context,
+	initial *Runtime,
+	identity *basev0.ServiceIdentity,
+	env *resources.Environment,
+	configuration *basev0.Configuration,
+	networkMappings []*basev0.NetworkMapping,
+	relation string,
+	fixtureID string,
+) {
+	t.Helper()
+
+	_, err := initial.Destroy(ctx, &runtimev0.DestroyRequest{})
+	require.NoError(t, err)
+
+	restarted := NewRuntime()
+	_, err = restarted.Load(ctx, &runtimev0.LoadRequest{
+		Identity:     identity,
+		Environment:  shared.Must(env.Proto()),
+		DisableCatch: true,
+	})
+	require.NoError(t, err)
+
+	init, err := restarted.Init(ctx, &runtimev0.InitRequest{
+		RuntimeContext:          resources.NewRuntimeContextContainer(),
+		Configuration:           configuration,
+		ProposedNetworkMappings: networkMappings,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, init)
+	defer func() {
+		_, destroyErr := restarted.Destroy(context.Background(), &runtimev0.DestroyRequest{})
+		require.NoError(t, destroyErr)
+	}()
+
+	_, err = restarted.Start(ctx, &runtimev0.StartRequest{})
+	require.NoError(t, err)
+
+	nativeConfiguration, err := resources.ExtractConfiguration(
+		init.RuntimeConfigurations,
+		resources.NewRuntimeContextNative(),
+	)
+	require.NoError(t, err)
+	readOnlyConnection, err := resources.GetConfigurationValue(
+		ctx,
+		nativeConfiguration,
+		"postgres",
+		readOnlyConnectionKey,
+	)
+	require.NoError(t, err)
+	reader, err := openPostgresCapabilityProbe(ctx, readOnlyConnection)
+	require.NoError(t, err)
+	defer reader.Close()
+
+	found, err := reader.HasFixture(ctx, relation, fixtureID)
+	require.NoError(t, err)
+	require.True(t, found, "data written before container recreation must remain available")
 }
