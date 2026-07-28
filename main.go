@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"net/url"
 	"strings"
 
@@ -98,17 +101,41 @@ type MigrationSource struct {
 const HotReload = "hot-reload"
 const DatabaseName = "database-name"
 
-// pgvector/pgvector:pg17 is the official Postgres 17 image with the pgvector
-// extension preinstalled (same docker-entrypoint as the stock postgres image,
-// so the full contrib set — pgcrypto, uuid-ossp, pg_trgm, citext, btree_gin, …
-// — is available too). Required so `CREATE EXTENSION vector` works — consumers
-// like Mind's knowledge-graph migration (vector(1024) column) depend on it. The
-// nix runtime gets pgvector via nix/flake.nix; this keeps both runtimes at
-// parity. Override per-service via Settings.DockerImage (e.g. for PostGIS).
-var image = &resources.DockerImage{
-	Name:   "pgvector/pgvector",
-	Tag:    "pg17",
-	Digest: "sha256:d2ef61f42ef767baa5a1475393303cc235bcd92febd9d7014eddb48b41f3bad0",
+// The managed image adds pgvector to the official Postgres 17 Alpine image
+// while preserving its entrypoint and contrib extensions. The nix runtime gets
+// pgvector via nix/flake.nix, keeping both runtimes at parity.
+var image = shared.Must(parseRuntimeImageLock(runtimeImageLockJSON))
+
+type runtimeImageLock struct {
+	Name   string `json:"name"`
+	Tag    string `json:"tag"`
+	Digest string `json:"digest"`
+}
+
+func parseRuntimeImageLock(content []byte) (*resources.DockerImage, error) {
+	var lock runtimeImageLock
+	if err := json.Unmarshal(content, &lock); err != nil {
+		return nil, fmt.Errorf("parse runtime image lock: %w", err)
+	}
+	if lock.Name == "" {
+		return nil, fmt.Errorf("runtime image name is required")
+	}
+	if lock.Tag == "" {
+		return nil, fmt.Errorf("runtime image tag is required")
+	}
+	if lock.Digest == "" {
+		return nil, fmt.Errorf("runtime image digest is required")
+	}
+	algorithm, encoded, found := strings.Cut(lock.Digest, ":")
+	decoded, err := hex.DecodeString(encoded)
+	if !found || algorithm != "sha256" || err != nil || len(decoded) != 32 {
+		return nil, fmt.Errorf("runtime image digest must be a sha256 digest")
+	}
+	return &resources.DockerImage{
+		Name:   lock.Name,
+		Tag:    lock.Tag,
+		Digest: lock.Digest,
+	}, nil
 }
 
 type DeploymentTemplateParameters struct {
@@ -292,3 +319,6 @@ var infoFS embed.FS
 
 //go:embed templates/agent
 var readmeFS embed.FS
+
+//go:embed runtime-image.json
+var runtimeImageLockJSON []byte
