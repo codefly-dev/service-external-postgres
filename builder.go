@@ -234,11 +234,11 @@ func (s *Builder) prepareDeployment(
 		return s.promotableConnectionConfiguration(instance), nil
 	}
 
-	configuration, err := s.CreateConnectionConfiguration(ctx, req.GetConfiguration(), instance, !s.Settings.WithoutSSL)
+	configuration, err := s.CreateConnectionConfiguration(ctx, req.GetConfiguration(), instance, !s.WithoutSSL)
 	if err != nil {
 		return nil, err
 	}
-	ownerConnection, err := s.createOwnerConnectionString(ctx, req.GetConfiguration(), instance.Address, !s.Settings.WithoutSSL)
+	ownerConnection, err := s.createOwnerConnectionString(ctx, req.GetConfiguration(), instance.Address, !s.WithoutSSL)
 	if err != nil {
 		return nil, err
 	}

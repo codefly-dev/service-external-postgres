@@ -133,8 +133,36 @@ func TestPromotableDeploymentUsesTypedSecretReferencesWithoutValues(t *testing.T
 	}
 }
 
-func TestPromotableGitOpsDeploymentReturnsConfigurationAndIsolatesSecrets(t *testing.T) {
-	useSuccessfulKubectl(t)
+func TestEphemeralDeploymentRetainsValueBasedConfigurationAndSecret(t *testing.T) {
+	builder, networkMappings := newDeploymentTestBuilder(t)
+	builder.DatabaseName = "accounts"
+	destination := t.TempDir()
+	request := promotableDeploymentRequest(destination, networkMappings, nil)
+	request.GetDeployment().GetKubernetes().Profile = builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1
+	request.Configuration = testPostgresConfiguration("migration-owner", "owner-secret", "reader-secret", "writer-secret")
+
+	response, err := builder.Deploy(context.Background(), request)
+	require.NoError(t, err)
+	require.Equal(t, builderv0.DeploymentStatus_SUCCESS, response.GetState().GetState(), response.GetState().GetMessage())
+	require.False(t, response.GetDeployment().GetKubernetes().GetValidation().GetPromotable())
+	require.NotEmpty(t, configurationValue(t, response.GetConfiguration(), ownerConnectionKey))
+
+	secret := readDeploymentFile(t, destination, "overlays", "test", "secret.yaml")
+	require.Contains(t, secret, "kind: Secret")
+	require.Contains(t, secret, "POSTGRES_PASSWORD: b3duZXItc2VjcmV0")
+	require.Contains(t, secret, "POSTGRES_READ_ONLY_PASSWORD: cmVhZGVyLXNlY3JldA==")
+	require.Contains(t, secret, "POSTGRES_READ_WRITE_PASSWORD: d3JpdGVyLXNlY3JldA==")
+}
+
+func assertMigrationResource(t *testing.T, dir string, expected bool) {
+	t.Helper()
+	content := readDeploymentFile(t, dir, "base", "kustomization.yaml")
+	if got := strings.Contains(content, "- job.yaml"); got != expected {
+		t.Fatalf("migration resource present = %t, want %t:\n%s", got, expected, content)
+	}
+}
+
+func TestPromotableGitOpsDeploymentReturnsReferenceOnlyConfigurationAndScopesSecrets(t *testing.T) {
 	builder, networkMappings := newDeploymentTestBuilder(t)
 	destination := t.TempDir()
 
@@ -142,7 +170,6 @@ func TestPromotableGitOpsDeploymentReturnsConfigurationAndIsolatesSecrets(t *tes
 		destination,
 		networkMappings,
 		promotablePostgresSecretReferences(),
-		true,
 	))
 	require.NoError(t, err)
 	require.Equal(t, builderv0.DeploymentStatus_SUCCESS, response.GetState().GetState(), response.GetState().GetMessage())
@@ -151,7 +178,7 @@ func TestPromotableGitOpsDeploymentReturnsConfigurationAndIsolatesSecrets(t *tes
 	require.Equal(t, builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1, output.GetProfile())
 	require.Equal(t, services.KubernetesManifestContractVersion, output.GetContractVersion())
 	require.Equal(t, builderv0.KubernetesManifestValidation_STATUS_PASSED, output.GetValidation().GetStaticValidation())
-	require.Equal(t, builderv0.KubernetesManifestValidation_STATUS_PASSED, output.GetValidation().GetServerSideValidation())
+	require.Equal(t, builderv0.KubernetesManifestValidation_STATUS_NOT_RUN, output.GetValidation().GetServerSideValidation())
 	require.True(t, output.GetValidation().GetPromotable())
 
 	configuration := response.GetConfiguration()
@@ -227,6 +254,28 @@ func TestPromotableGitOpsDeploymentReturnsConfigurationAndIsolatesSecrets(t *tes
 	}
 }
 
+func TestPromotableGitOpsDeploymentReportsExplicitValidationContext(t *testing.T) {
+	useSuccessfulKubectl(t)
+	builder, networkMappings := newDeploymentTestBuilder(t)
+	request := promotableDeploymentRequest(
+		t.TempDir(),
+		networkMappings,
+		promotablePostgresSecretReferences(),
+	)
+	kubernetes := request.GetDeployment().GetKubernetes()
+	kubernetes.ValidateServerSide = true
+	kubernetes.ValidationKubeconfig = "/tmp/codefly-test-kubeconfig"
+	kubernetes.ValidationContext = "k3d-codefly-test"
+
+	response, err := builder.Deploy(context.Background(), request)
+	require.NoError(t, err)
+	require.Equal(t, builderv0.DeploymentStatus_SUCCESS, response.GetState().GetState(), response.GetState().GetMessage())
+	validation := response.GetDeployment().GetKubernetes().GetValidation()
+	require.Equal(t, builderv0.KubernetesManifestValidation_STATUS_PASSED, validation.GetServerSideValidation())
+	require.Equal(t, "k3d-codefly-test", validation.GetValidatedContext())
+	require.True(t, validation.GetPromotable())
+}
+
 func TestPromotableGitOpsDeploymentRejectsMissingOrOptionalRequiredSecretReferences(t *testing.T) {
 	required := []string{
 		"POSTGRES_USER",
@@ -249,7 +298,6 @@ func TestPromotableGitOpsDeploymentRejectsMissingOrOptionalRequiredSecretReferen
 				t.TempDir(),
 				networkMappings,
 				references,
-				false,
 			))
 			require.NoError(t, err)
 			require.Equal(t, builderv0.DeploymentStatus_ERROR, response.GetState().GetState())
@@ -271,7 +319,6 @@ func TestPromotableGitOpsDeploymentRejectsMissingOrOptionalRequiredSecretReferen
 				t.TempDir(),
 				networkMappings,
 				references,
-				false,
 			))
 			require.NoError(t, err)
 			require.Equal(t, builderv0.DeploymentStatus_ERROR, response.GetState().GetState())
@@ -286,13 +333,13 @@ func newDeploymentTestBuilder(t *testing.T) (*Builder, []*basev0.NetworkMapping)
 	ctx := context.Background()
 	builder := NewBuilder()
 	identity := &basev0.ServiceIdentity{
-		Name:      "postgres",
-		Module:    "module",
 		Workspace: "workspace",
+		Module:    "module",
+		Name:      "postgres",
 		Version:   "1.2.3",
 	}
-	require.NoError(t, builder.Base.HeadlessLoad(ctx, identity))
-	builder.Base.Information = &services.Information{
+	require.NoError(t, builder.HeadlessLoad(ctx, identity))
+	builder.Information = &services.Information{
 		Service: resources.ToServiceWithCase(builder.Identity),
 		Module:  resources.ToModuleWithCase(builder.Identity),
 	}
@@ -316,7 +363,6 @@ func promotableDeploymentRequest(
 	destination string,
 	networkMappings []*basev0.NetworkMapping,
 	secretReferences map[string]*builderv0.KubernetesSecretKeyReference,
-	validateServerSide bool,
 ) *builderv0.DeploymentRequest {
 	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	return &builderv0.DeploymentRequest{
@@ -325,14 +371,11 @@ func promotableDeploymentRequest(
 		Deployment: &builderv0.Deployment{
 			Kind: &builderv0.Deployment_Kubernetes{
 				Kubernetes: &builderv0.KubernetesDeployment{
-					Namespace:            "codefly-test",
-					Destination:          destination,
-					BuildContext:         &builderv0.DockerBuildContext{DockerRepository: "registry.example.com", ImageDigest: digest},
-					Profile:              builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1,
-					SecretReferences:     secretReferences,
-					ValidateServerSide:   validateServerSide,
-					ValidationKubeconfig: "/dev/null",
-					ValidationContext:    "test-context",
+					Namespace:        "codefly-test",
+					Destination:      destination,
+					BuildContext:     &builderv0.DockerBuildContext{DockerRepository: "registry.example.com", ImageDigest: digest},
+					Profile:          builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1,
+					SecretReferences: secretReferences,
 				},
 			},
 		},
@@ -368,14 +411,6 @@ func useSuccessfulKubectl(t *testing.T) {
 	kubectl := filepath.Join(bin, "kubectl")
 	require.NoError(t, os.WriteFile(kubectl, []byte("#!/bin/sh\ncat >/dev/null\n"), 0o755))
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
-
-func assertMigrationResource(t *testing.T, dir string, expected bool) {
-	t.Helper()
-	content := readDeploymentFile(t, dir, "base", "kustomization.yaml")
-	if got := strings.Contains(content, "- job.yaml"); got != expected {
-		t.Fatalf("migration resource present = %t, want %t:\n%s", got, expected, content)
-	}
 }
 
 func assertEphemeralSecret(t *testing.T, dir string) {
