@@ -50,10 +50,10 @@ spec:
             allowPrivilegeEscalation: false
             runAsNonRoot: true
             runAsUser: 70
+            readOnlyRootFilesystem: true
             capabilities:
               drop:
                 - ALL
-            readOnlyRootFilesystem: true
             seccompProfile:
               type: RuntimeDefault
           ports:
@@ -63,17 +63,17 @@ spec:
           envFrom:
             - secretRef:
                 name: secret-{{ .Service.Name.DNSCase }}
-{{- end }}
-{{- if .GitOps }}
+{{- else }}
           env:
             - name: POSTGRES_DB
               value: "{{ .Deployment.Parameters.DatabaseName }}"
-{{- range $key, $reference := .SecretReferences }}
-            - name: {{ $key }}
+{{- range $environmentVariable, $reference := .Deployment.Parameters.StatefulSetSecretReferences }}
+            - name: {{ $environmentVariable }}
               valueFrom:
                 secretKeyRef:
                   name: {{ $reference.Name }}
                   key: {{ $reference.Key }}
+                  optional: {{ $reference.Optional }}
 {{- end }}
 {{- end }}
           # Modest defaults — tune in overlay per-tenant. The PSS

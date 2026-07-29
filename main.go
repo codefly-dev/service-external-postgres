@@ -14,6 +14,7 @@ import (
 	"github.com/codefly-dev/core/builders"
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
 	agentv0 "github.com/codefly-dev/core/generated/go/codefly/services/agent/v0"
+	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 	"github.com/codefly-dev/core/resources"
 	runnersbase "github.com/codefly-dev/core/runners/base"
 	"github.com/codefly-dev/core/shared"
@@ -139,9 +140,11 @@ func parseRuntimeImageLock(content []byte) (*resources.DockerImage, error) {
 }
 
 type DeploymentTemplateParameters struct {
-	WithBootstrap bool
-	ManagedImage  string
-	DatabaseName  string
+	WithBootstrap                bool
+	ManagedImage                 string
+	DatabaseName                 string
+	StatefulSetSecretReferences  map[string]*builderv0.KubernetesSecretKeyReference
+	BootstrapJobSecretReferences map[string]*builderv0.KubernetesSecretKeyReference
 }
 
 // defaultExtensions are CREATE EXTENSION'd on every start (best-effort). They
@@ -291,18 +294,22 @@ func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev
 	return outputConf, nil
 }
 
+// promotableConnectionConfiguration describes the capability-scoped handoff
+// without embedding credentials. The migration owner remains private to the
+// bootstrap Job and is never advertised to dependent workloads.
 func (s *Service) promotableConnectionConfiguration(instance *basev0.NetworkInstance) *basev0.Configuration {
 	return &basev0.Configuration{
 		Origin:         s.Base.Unique(),
 		RuntimeContext: resources.RuntimeContextFromInstance(instance),
-		Infos: []*basev0.ConfigurationInformation{{
-			Name: "postgres",
-			ConfigurationValues: []*basev0.ConfigurationValue{
-				{Key: ownerConnectionKey, Secret: true},
-				{Key: readOnlyConnectionKey, Secret: true},
-				{Key: readWriteConnectionKey, Secret: true},
+		Infos: []*basev0.ConfigurationInformation{
+			{
+				Name: "postgres",
+				ConfigurationValues: []*basev0.ConfigurationValue{
+					{Key: readOnlyConnectionKey, Secret: true},
+					{Key: readWriteConnectionKey, Secret: true},
+				},
 			},
-		}},
+		},
 	}
 }
 

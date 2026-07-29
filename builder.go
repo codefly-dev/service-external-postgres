@@ -175,49 +175,26 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
 
+	parameters := &DeploymentTemplateParameters{
+		WithBootstrap: true,
+		ManagedImage:  s.dockerImage().FullName(),
+		DatabaseName:  s.DatabaseName,
+	}
 	var promotableConfiguration *v0.Configuration
 	response, err := s.Builder.DeployKustomize(ctx, req, services.KustomizeDeployment{
 		EnvironmentVariables: s.EnvironmentVariables,
 		Templates:            deploymentFS,
-		Parameters: DeploymentTemplateParameters{
-			WithBootstrap: true,
-			ManagedImage:  s.dockerImage().FullName(),
-			DatabaseName:  s.DatabaseName,
-		},
+		Parameters:           parameters,
 		Prepare: func(ctx context.Context, deployment *services.KustomizeDeploymentContext) error {
-			instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, req.GetNetworkMappings(), s.TcpEndpoint, resources.NewPublicNetworkAccess())
-			if err != nil {
-				return err
+			configuration, prepareErr := s.prepareDeployment(ctx, deployment, parameters)
+			if prepareErr != nil {
+				return prepareErr
 			}
+			s.Wool.Debug("exporting configuration", wool.Field("conf", resources.MakeConfigurationSummary(configuration)))
 			if deployment.Profile == builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1 {
-				references, err := s.promotableSecretReferences(deployment.Kubernetes.GetSecretReferences())
-				if err != nil {
-					return err
-				}
-				deployment.Kubernetes.SecretReferences = references
-				promotableConfiguration = s.promotableConnectionConfiguration(instance)
+				promotableConfiguration = configuration
 				return nil
 			}
-			configuration, err := s.CreateConnectionConfiguration(ctx, req.GetConfiguration(), instance, !s.Settings.WithoutSSL)
-			if err != nil {
-				return err
-			}
-			ownerConnection, err := s.createOwnerConnectionString(ctx, req.GetConfiguration(), instance.Address, !s.Settings.WithoutSSL)
-			if err != nil {
-				return err
-			}
-			// These values are private to the Postgres StatefulSet/bootstrap Job.
-			// Only the capability-scoped configuration above is exported to
-			// dependent services.
-			deployment.AddSecrets(
-				resources.Env("POSTGRES_USER", s.postgresUser),
-				resources.Env("POSTGRES_PASSWORD", s.postgresPassword),
-				resources.Env("POSTGRES_DB", s.DatabaseName),
-				resources.Env("POSTGRES_READ_ONLY_PASSWORD", s.readOnlyPassword),
-				resources.Env("POSTGRES_READ_WRITE_PASSWORD", s.readWritePassword),
-				resources.Env(migrationConnectionEnvironmentKey, ownerConnection),
-			)
-			s.Wool.Debug("exporting configuration", wool.Field("conf", resources.MakeConfigurationSummary(configuration)))
 			return deployment.ExportConfiguration(ctx, configuration)
 		},
 	})
@@ -230,37 +207,114 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	return response, nil
 }
 
-func (s *Builder) promotableSecretReferences(
+func (s *Builder) prepareDeployment(
+	ctx context.Context,
+	deployment *services.KustomizeDeploymentContext,
+	parameters *DeploymentTemplateParameters,
+) (*v0.Configuration, error) {
+	req := deployment.Request
+	instance, err := resources.FindNetworkInstanceInNetworkMappings(
+		ctx,
+		req.GetNetworkMappings(),
+		s.TcpEndpoint,
+		resources.NewPublicNetworkAccess(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	if deployment.Profile == builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1 {
+		workloadReferences, referencesErr := s.selectPromotableSecretReferences(
+			deployment.Kubernetes.GetSecretReferences(),
+		)
+		if referencesErr != nil {
+			return nil, referencesErr
+		}
+		parameters.StatefulSetSecretReferences = workloadReferences.StatefulSet
+		parameters.BootstrapJobSecretReferences = workloadReferences.BootstrapJob
+		return s.promotableConnectionConfiguration(instance), nil
+	}
+
+	configuration, err := s.CreateConnectionConfiguration(ctx, req.GetConfiguration(), instance, !s.Settings.WithoutSSL)
+	if err != nil {
+		return nil, err
+	}
+	ownerConnection, err := s.createOwnerConnectionString(ctx, req.GetConfiguration(), instance.Address, !s.Settings.WithoutSSL)
+	if err != nil {
+		return nil, err
+	}
+	// These raw workload values stay in the ephemeral profile's generated
+	// Secret; callers receive only the managed-resource configuration.
+	deployment.AddSecrets(
+		resources.Env("POSTGRES_USER", s.postgresUser),
+		resources.Env("POSTGRES_PASSWORD", s.postgresPassword),
+		resources.Env("POSTGRES_DB", s.DatabaseName),
+		resources.Env("POSTGRES_READ_ONLY_PASSWORD", s.readOnlyPassword),
+		resources.Env("POSTGRES_READ_WRITE_PASSWORD", s.readWritePassword),
+		resources.Env(migrationConnectionEnvironmentKey, ownerConnection),
+	)
+	return configuration, nil
+}
+
+type promotableWorkloadSecretReferences struct {
+	StatefulSet  map[string]*builderv0.KubernetesSecretKeyReference
+	BootstrapJob map[string]*builderv0.KubernetesSecretKeyReference
+}
+
+func (s *Builder) selectPromotableSecretReferences(
 	configured map[string]*builderv0.KubernetesSecretKeyReference,
-) (map[string]*builderv0.KubernetesSecretKeyReference, error) {
-	references := make(map[string]*builderv0.KubernetesSecretKeyReference, 5)
+) (*promotableWorkloadSecretReferences, error) {
+	statefulSetEnvironmentVariables := []string{
+		"POSTGRES_USER",
+		"POSTGRES_PASSWORD",
+	}
+	bootstrapJobEnvironmentVariables := []string{
+		"POSTGRES_USER",
+		"POSTGRES_READ_ONLY_PASSWORD",
+		"POSTGRES_READ_WRITE_PASSWORD",
+	}
+	selected := make(map[string]*builderv0.KubernetesSecretKeyReference, 5)
 	secretName := ""
-	for _, key := range []string{
+	for _, environmentVariable := range []string{
 		"POSTGRES_USER",
 		"POSTGRES_PASSWORD",
 		"POSTGRES_READ_ONLY_PASSWORD",
 		"POSTGRES_READ_WRITE_PASSWORD",
 	} {
-		configurationKey := resources.ServiceSecretConfigurationKeyFromUnique(s.Unique(), "postgres", key)
+		configurationKey := resources.ServiceSecretConfigurationKeyFromUnique(
+			s.Unique(),
+			"postgres",
+			environmentVariable,
+		)
 		reference := configured[configurationKey]
-		if reference == nil {
-			return nil, fmt.Errorf("Postgres GitOps rendering requires a typed Kubernetes Secret reference for %s", configurationKey)
+		if reference == nil || reference.GetName() == "" || reference.GetKey() == "" {
+			return nil, fmt.Errorf("postgres deployment requires a typed Kubernetes Secret reference for %s", configurationKey)
 		}
 		if reference.GetOptional() {
-			return nil, fmt.Errorf("Postgres Secret reference for %s must not be optional", configurationKey)
+			return nil, fmt.Errorf("%s Kubernetes Secret reference must not be optional", configurationKey)
 		}
 		if secretName == "" {
 			secretName = reference.GetName()
-		} else if reference.GetName() != secretName {
-			return nil, fmt.Errorf("Postgres credential references must use one Kubernetes Secret")
+		} else if secretName != reference.GetName() {
+			return nil, fmt.Errorf("postgres credential references must use one Kubernetes Secret")
 		}
-		references[key] = reference
+		selected[environmentVariable] = reference
 	}
-	references[migrationConnectionEnvironmentKey] = &builderv0.KubernetesSecretKeyReference{
+	selected[migrationConnectionEnvironmentKey] = &builderv0.KubernetesSecretKeyReference{
 		Name: secretName,
 		Key:  migrationConnectionEnvironmentKey,
 	}
-	return references, nil
+	bootstrapJobEnvironmentVariables = append(bootstrapJobEnvironmentVariables, migrationConnectionEnvironmentKey)
+	selectForWorkload := func(environmentVariables []string) map[string]*builderv0.KubernetesSecretKeyReference {
+		workloadReferences := make(map[string]*builderv0.KubernetesSecretKeyReference, len(environmentVariables))
+		for _, environmentVariable := range environmentVariables {
+			workloadReferences[environmentVariable] = selected[environmentVariable]
+		}
+		return workloadReferences
+	}
+	return &promotableWorkloadSecretReferences{
+		StatefulSet:  selectForWorkload(statefulSetEnvironmentVariables),
+		BootstrapJob: selectForWorkload(bootstrapJobEnvironmentVariables),
+	}, nil
 }
 
 type create struct {
