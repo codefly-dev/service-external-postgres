@@ -175,17 +175,28 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) (*builderv0.DeploymentResponse, error) {
 	defer s.Wool.Catch()
 
-	return s.Builder.DeployKustomize(ctx, req, services.KustomizeDeployment{
+	var promotableConfiguration *v0.Configuration
+	response, err := s.Builder.DeployKustomize(ctx, req, services.KustomizeDeployment{
 		EnvironmentVariables: s.EnvironmentVariables,
 		Templates:            deploymentFS,
 		Parameters: DeploymentTemplateParameters{
 			WithBootstrap: true,
 			ManagedImage:  s.dockerImage().FullName(),
+			DatabaseName:  s.DatabaseName,
 		},
 		Prepare: func(ctx context.Context, deployment *services.KustomizeDeploymentContext) error {
 			instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, req.GetNetworkMappings(), s.TcpEndpoint, resources.NewPublicNetworkAccess())
 			if err != nil {
 				return err
+			}
+			if deployment.Profile == builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1 {
+				references, err := s.promotableSecretReferences(deployment.Kubernetes.GetSecretReferences())
+				if err != nil {
+					return err
+				}
+				deployment.Kubernetes.SecretReferences = references
+				promotableConfiguration = s.promotableConnectionConfiguration(instance)
+				return nil
 			}
 			configuration, err := s.CreateConnectionConfiguration(ctx, req.GetConfiguration(), instance, !s.Settings.WithoutSSL)
 			if err != nil {
@@ -210,6 +221,46 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 			return deployment.ExportConfiguration(ctx, configuration)
 		},
 	})
+	if err != nil ||
+		response.GetState().GetState() != builderv0.DeploymentStatus_SUCCESS ||
+		promotableConfiguration == nil {
+		return response, err
+	}
+	response.Configuration = promotableConfiguration
+	return response, nil
+}
+
+func (s *Builder) promotableSecretReferences(
+	configured map[string]*builderv0.KubernetesSecretKeyReference,
+) (map[string]*builderv0.KubernetesSecretKeyReference, error) {
+	references := make(map[string]*builderv0.KubernetesSecretKeyReference, 5)
+	secretName := ""
+	for _, key := range []string{
+		"POSTGRES_USER",
+		"POSTGRES_PASSWORD",
+		"POSTGRES_READ_ONLY_PASSWORD",
+		"POSTGRES_READ_WRITE_PASSWORD",
+	} {
+		configurationKey := resources.ServiceSecretConfigurationKeyFromUnique(s.Unique(), "postgres", key)
+		reference := configured[configurationKey]
+		if reference == nil {
+			return nil, fmt.Errorf("Postgres GitOps rendering requires a typed Kubernetes Secret reference for %s", configurationKey)
+		}
+		if reference.GetOptional() {
+			return nil, fmt.Errorf("Postgres Secret reference for %s must not be optional", configurationKey)
+		}
+		if secretName == "" {
+			secretName = reference.GetName()
+		} else if reference.GetName() != secretName {
+			return nil, fmt.Errorf("Postgres credential references must use one Kubernetes Secret")
+		}
+		references[key] = reference
+	}
+	references[migrationConnectionEnvironmentKey] = &builderv0.KubernetesSecretKeyReference{
+		Name: secretName,
+		Key:  migrationConnectionEnvironmentKey,
+	}
+	return references, nil
 }
 
 type create struct {

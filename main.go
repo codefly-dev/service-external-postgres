@@ -141,6 +141,7 @@ func parseRuntimeImageLock(content []byte) (*resources.DockerImage, error) {
 type DeploymentTemplateParameters struct {
 	WithBootstrap bool
 	ManagedImage  string
+	DatabaseName  string
 }
 
 // defaultExtensions are CREATE EXTENSION'd on every start (best-effort). They
@@ -288,6 +289,21 @@ func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev
 		},
 	}
 	return outputConf, nil
+}
+
+func (s *Service) promotableConnectionConfiguration(instance *basev0.NetworkInstance) *basev0.Configuration {
+	return &basev0.Configuration{
+		Origin:         s.Base.Unique(),
+		RuntimeContext: resources.RuntimeContextFromInstance(instance),
+		Infos: []*basev0.ConfigurationInformation{{
+			Name: "postgres",
+			ConfigurationValues: []*basev0.ConfigurationValue{
+				{Key: ownerConnectionKey, Secret: true},
+				{Key: readOnlyConnectionKey, Secret: true},
+				{Key: readWriteConnectionKey, Secret: true},
+			},
+		}},
+	}
 }
 
 func postgresConnectionString(address, database, user, password string, withSSL bool) string {
