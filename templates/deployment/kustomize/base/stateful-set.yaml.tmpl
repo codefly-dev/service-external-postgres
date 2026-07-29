@@ -59,12 +59,14 @@ spec:
           ports:
             - name: postgres
               containerPort: 5432
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
 {{- if not .GitOps }}
           envFrom:
             - secretRef:
                 name: secret-{{ .Service.Name.DNSCase }}
 {{- else }}
-          env:
             - name: POSTGRES_DB
               value: "{{ .Deployment.Parameters.DatabaseName }}"
 {{- range $environmentVariable, $reference := .Deployment.Parameters.StatefulSetSecretReferences }}
@@ -114,10 +116,6 @@ spec:
           volumeMounts:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data
-              # subPath keeps init metadata out of the PV root — the
-              # official image refuses to start when /var/lib/postgresql/data
-              # contains a `lost+found` (which `ext4` PVs include).
-              subPath: pgdata
             - name: postgres-run
               mountPath: /var/run/postgresql
             - name: tmp

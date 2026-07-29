@@ -214,6 +214,8 @@ func TestPromotableGitOpsDeploymentReturnsReferenceOnlyConfigurationAndScopesSec
 	statefulSet := readDeploymentFile(t, destination, "base", "stateful-set.yaml")
 	for _, expected := range []string{
 		image.FullName(),
+		"name: PGDATA",
+		"value: /var/lib/postgresql/data/pgdata",
 		"name: POSTGRES_USER",
 		"name: POSTGRES_PASSWORD",
 		"name: POSTGRES_DB",
@@ -224,6 +226,7 @@ func TestPromotableGitOpsDeploymentReturnsReferenceOnlyConfigurationAndScopesSec
 	}
 	for _, unexpected := range []string{
 		"envFrom:",
+		"subPath: pgdata",
 		"name: POSTGRES_READ_ONLY_PASSWORD",
 		"name: POSTGRES_READ_WRITE_PASSWORD",
 		"name: " + migrationConnectionEnvironmentKey,
