@@ -178,6 +178,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	parameters := &DeploymentTemplateParameters{
 		WithBootstrap: true,
 		ManagedImage:  s.dockerImage().FullName(),
+		DatabaseName:  s.DatabaseName,
 	}
 	var promotableConfiguration *v0.Configuration
 	response, err := s.Builder.DeployKustomize(ctx, req, services.KustomizeDeployment{
@@ -222,7 +223,7 @@ func (s *Builder) prepareDeployment(
 		return nil, err
 	}
 	if deployment.Profile == builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1 {
-		workloadReferences, referencesErr := selectPromotableSecretReferences(
+		workloadReferences, referencesErr := s.selectPromotableSecretReferences(
 			deployment.Kubernetes.GetSecretReferences(),
 		)
 		if referencesErr != nil {
@@ -233,11 +234,11 @@ func (s *Builder) prepareDeployment(
 		return s.promotableConnectionConfiguration(instance), nil
 	}
 
-	configuration, err := s.CreateConnectionConfiguration(ctx, req.GetConfiguration(), instance, !s.Settings.WithoutSSL)
+	configuration, err := s.CreateConnectionConfiguration(ctx, req.GetConfiguration(), instance, !s.WithoutSSL)
 	if err != nil {
 		return nil, err
 	}
-	ownerConnection, err := s.createOwnerConnectionString(ctx, req.GetConfiguration(), instance.Address, !s.Settings.WithoutSSL)
+	ownerConnection, err := s.createOwnerConnectionString(ctx, req.GetConfiguration(), instance.Address, !s.WithoutSSL)
 	if err != nil {
 		return nil, err
 	}
@@ -259,31 +260,50 @@ type promotableWorkloadSecretReferences struct {
 	BootstrapJob map[string]*builderv0.KubernetesSecretKeyReference
 }
 
-func selectPromotableSecretReferences(
-	references map[string]*builderv0.KubernetesSecretKeyReference,
+func (s *Builder) selectPromotableSecretReferences(
+	configured map[string]*builderv0.KubernetesSecretKeyReference,
 ) (*promotableWorkloadSecretReferences, error) {
 	statefulSetEnvironmentVariables := []string{
 		"POSTGRES_USER",
 		"POSTGRES_PASSWORD",
-		"POSTGRES_DB",
 	}
 	bootstrapJobEnvironmentVariables := []string{
 		"POSTGRES_USER",
 		"POSTGRES_READ_ONLY_PASSWORD",
 		"POSTGRES_READ_WRITE_PASSWORD",
-		migrationConnectionEnvironmentKey,
 	}
-	selected := make(map[string]*builderv0.KubernetesSecretKeyReference)
-	for _, environmentVariable := range append(statefulSetEnvironmentVariables, bootstrapJobEnvironmentVariables...) {
-		reference := references[environmentVariable]
+	selected := make(map[string]*builderv0.KubernetesSecretKeyReference, 5)
+	secretName := ""
+	for _, environmentVariable := range []string{
+		"POSTGRES_USER",
+		"POSTGRES_PASSWORD",
+		"POSTGRES_READ_ONLY_PASSWORD",
+		"POSTGRES_READ_WRITE_PASSWORD",
+	} {
+		configurationKey := resources.ServiceSecretConfigurationKeyFromUnique(
+			s.Unique(),
+			"postgres",
+			environmentVariable,
+		)
+		reference := configured[configurationKey]
 		if reference == nil || reference.GetName() == "" || reference.GetKey() == "" {
-			return nil, fmt.Errorf("postgres deployment requires a typed Kubernetes Secret reference for %s", environmentVariable)
+			return nil, fmt.Errorf("postgres deployment requires a typed Kubernetes Secret reference for %s", configurationKey)
 		}
 		if reference.GetOptional() {
-			return nil, fmt.Errorf("%s Kubernetes Secret reference must not be optional", environmentVariable)
+			return nil, fmt.Errorf("%s Kubernetes Secret reference must not be optional", configurationKey)
+		}
+		if secretName == "" {
+			secretName = reference.GetName()
+		} else if secretName != reference.GetName() {
+			return nil, fmt.Errorf("postgres credential references must use one Kubernetes Secret")
 		}
 		selected[environmentVariable] = reference
 	}
+	selected[migrationConnectionEnvironmentKey] = &builderv0.KubernetesSecretKeyReference{
+		Name: secretName,
+		Key:  migrationConnectionEnvironmentKey,
+	}
+	bootstrapJobEnvironmentVariables = append(bootstrapJobEnvironmentVariables, migrationConnectionEnvironmentKey)
 	selectForWorkload := func(environmentVariables []string) map[string]*builderv0.KubernetesSecretKeyReference {
 		workloadReferences := make(map[string]*builderv0.KubernetesSecretKeyReference, len(environmentVariables))
 		for _, environmentVariable := range environmentVariables {

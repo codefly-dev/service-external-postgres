@@ -65,6 +65,8 @@ spec:
                 name: secret-{{ .Service.Name.DNSCase }}
 {{- else }}
           env:
+            - name: POSTGRES_DB
+              value: "{{ .Deployment.Parameters.DatabaseName }}"
 {{- range $environmentVariable, $reference := .Deployment.Parameters.StatefulSetSecretReferences }}
             - name: {{ $environmentVariable }}
               valueFrom:

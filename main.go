@@ -142,6 +142,7 @@ func parseRuntimeImageLock(content []byte) (*resources.DockerImage, error) {
 type DeploymentTemplateParameters struct {
 	WithBootstrap                bool
 	ManagedImage                 string
+	DatabaseName                 string
 	StatefulSetSecretReferences  map[string]*builderv0.KubernetesSecretKeyReference
 	BootstrapJobSecretReferences map[string]*builderv0.KubernetesSecretKeyReference
 }
@@ -278,7 +279,7 @@ func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev
 	readWriteConnection := postgresConnectionString(instance.Address, s.DatabaseName, readWriteRole, s.readWritePassword, withSSL)
 
 	outputConf := &basev0.Configuration{
-		Origin:         s.Base.Unique(),
+		Origin:         s.Unique(),
 		RuntimeContext: resources.RuntimeContextFromInstance(instance),
 		Infos: []*basev0.ConfigurationInformation{
 			{Name: "postgres",
@@ -298,7 +299,7 @@ func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev
 // bootstrap Job and is never advertised to dependent workloads.
 func (s *Service) promotableConnectionConfiguration(instance *basev0.NetworkInstance) *basev0.Configuration {
 	return &basev0.Configuration{
-		Origin:         s.Base.Unique(),
+		Origin:         s.Unique(),
 		RuntimeContext: resources.RuntimeContextFromInstance(instance),
 		Infos: []*basev0.ConfigurationInformation{
 			{

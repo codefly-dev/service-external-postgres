@@ -31,8 +31,138 @@ func TestDeploymentTemplatesWithoutBootstrap(t *testing.T) {
 	assertMigrationResource(t, dir, false)
 }
 
-func TestPromotableGitOpsDeploymentReturnsConfigurationAndIsolatesSecrets(t *testing.T) {
-	useSuccessfulKubectl(t)
+func TestPromotableDeploymentUsesTypedSecretReferencesWithoutValues(t *testing.T) {
+	ctx := context.Background()
+	builder := NewBuilder()
+	identity := &basev0.ServiceIdentity{
+		Workspace: "workspace",
+		Module:    "module",
+		Name:      "store",
+		Version:   "1.2.3",
+	}
+	if err := builder.HeadlessLoad(ctx, identity); err != nil {
+		t.Fatal(err)
+	}
+	builder.DatabaseName = "users"
+	builder.Information = &services.Information{
+		Service: resources.ToServiceWithCase(builder.Identity),
+		Module:  resources.ToModuleWithCase(builder.Identity),
+	}
+	builder.TcpEndpoint = &basev0.Endpoint{
+		Name:    "tcp",
+		Module:  identity.Module,
+		Service: identity.Name,
+		Api:     "tcp",
+	}
+	instance := resources.NewNetworkInstance("store.platform.svc.cluster.local", 5432)
+	instance.Access = resources.NewPublicNetworkAccess()
+	secretReferences := make(map[string]*builderv0.KubernetesSecretKeyReference)
+	for _, key := range []string{
+		"POSTGRES_USER",
+		"POSTGRES_PASSWORD",
+		"POSTGRES_READ_ONLY_PASSWORD",
+		"POSTGRES_READ_WRITE_PASSWORD",
+	} {
+		configurationKey := resources.ServiceSecretConfigurationKeyFromUnique(builder.Unique(), "postgres", key)
+		secretReferences[configurationKey] = &builderv0.KubernetesSecretKeyReference{
+			Name: "store-secrets",
+			Key:  configurationKey,
+		}
+	}
+	destination := t.TempDir()
+
+	response, err := builder.Deploy(ctx, &builderv0.DeploymentRequest{
+		Environment: &basev0.Environment{Name: "local"},
+		NetworkMappings: []*basev0.NetworkMapping{{
+			Endpoint:  builder.TcpEndpoint,
+			Instances: []*basev0.NetworkInstance{instance},
+		}},
+		Deployment: &builderv0.Deployment{Kind: &builderv0.Deployment_Kubernetes{
+			Kubernetes: &builderv0.KubernetesDeployment{
+				Namespace:        "platform",
+				Destination:      destination,
+				Profile:          builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1,
+				SecretReferences: secretReferences,
+				BuildContext: &builderv0.DockerBuildContext{
+					DockerRepository: "registry.example.com",
+					ImageDigest:      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.GetState().GetState() != builderv0.DeploymentStatus_SUCCESS {
+		t.Fatalf("deployment failed: %s", response.GetState().GetMessage())
+	}
+	if !response.GetDeployment().GetKubernetes().GetValidation().GetPromotable() {
+		t.Fatal("deployment is not promotable")
+	}
+	for _, value := range response.GetConfiguration().GetInfos()[0].GetConfigurationValues() {
+		if !value.GetSecret() || value.GetValue() != "" {
+			t.Fatalf("exported connection contains a value: %+v", value)
+		}
+	}
+
+	tree := ""
+	for _, file := range []string{"stateful-set.yaml", "job.yaml"} {
+		content, readErr := os.ReadFile(filepath.Join(destination, "base", file))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		tree += string(content)
+	}
+	for _, expected := range []string{
+		"name: POSTGRES_USER",
+		"name: POSTGRES_PASSWORD",
+		"name: POSTGRES_READ_ONLY_PASSWORD",
+		"name: POSTGRES_READ_WRITE_PASSWORD",
+		"name: CODEFLY_POSTGRES_MIGRATION_CONNECTION",
+		"name: store-secrets",
+		`value: "users"`,
+	} {
+		if !strings.Contains(tree, expected) {
+			t.Errorf("manifest tree missing %q:\n%s", expected, tree)
+		}
+	}
+	for configurationKey := range secretReferences {
+		if strings.Contains(tree, "name: "+configurationKey) {
+			t.Errorf("manifest exposed configuration key %q as a runtime variable", configurationKey)
+		}
+	}
+}
+
+func TestEphemeralDeploymentRetainsValueBasedConfigurationAndSecret(t *testing.T) {
+	builder, networkMappings := newDeploymentTestBuilder(t)
+	builder.DatabaseName = "accounts"
+	destination := t.TempDir()
+	request := promotableDeploymentRequest(destination, networkMappings, nil)
+	request.GetDeployment().GetKubernetes().Profile = builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_EPHEMERAL_LOCAL_APPLY_V1
+	request.Configuration = testPostgresConfiguration("migration-owner", "owner-secret", "reader-secret", "writer-secret")
+
+	response, err := builder.Deploy(context.Background(), request)
+	require.NoError(t, err)
+	require.Equal(t, builderv0.DeploymentStatus_SUCCESS, response.GetState().GetState(), response.GetState().GetMessage())
+	require.False(t, response.GetDeployment().GetKubernetes().GetValidation().GetPromotable())
+	require.NotEmpty(t, configurationValue(t, response.GetConfiguration(), ownerConnectionKey))
+
+	secret := readDeploymentFile(t, destination, "overlays", "test", "secret.yaml")
+	require.Contains(t, secret, "kind: Secret")
+	require.Contains(t, secret, "POSTGRES_PASSWORD: b3duZXItc2VjcmV0")
+	require.Contains(t, secret, "POSTGRES_READ_ONLY_PASSWORD: cmVhZGVyLXNlY3JldA==")
+	require.Contains(t, secret, "POSTGRES_READ_WRITE_PASSWORD: d3JpdGVyLXNlY3JldA==")
+}
+
+func assertMigrationResource(t *testing.T, dir string, expected bool) {
+	t.Helper()
+	content := readDeploymentFile(t, dir, "base", "kustomization.yaml")
+	if got := strings.Contains(content, "- job.yaml"); got != expected {
+		t.Fatalf("migration resource present = %t, want %t:\n%s", got, expected, content)
+	}
+}
+
+func TestPromotableGitOpsDeploymentReturnsReferenceOnlyConfigurationAndScopesSecrets(t *testing.T) {
 	builder, networkMappings := newDeploymentTestBuilder(t)
 	destination := t.TempDir()
 
@@ -40,7 +170,6 @@ func TestPromotableGitOpsDeploymentReturnsConfigurationAndIsolatesSecrets(t *tes
 		destination,
 		networkMappings,
 		promotablePostgresSecretReferences(),
-		true,
 	))
 	require.NoError(t, err)
 	require.Equal(t, builderv0.DeploymentStatus_SUCCESS, response.GetState().GetState(), response.GetState().GetMessage())
@@ -49,7 +178,7 @@ func TestPromotableGitOpsDeploymentReturnsConfigurationAndIsolatesSecrets(t *tes
 	require.Equal(t, builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1, output.GetProfile())
 	require.Equal(t, services.KubernetesManifestContractVersion, output.GetContractVersion())
 	require.Equal(t, builderv0.KubernetesManifestValidation_STATUS_PASSED, output.GetValidation().GetStaticValidation())
-	require.Equal(t, builderv0.KubernetesManifestValidation_STATUS_PASSED, output.GetValidation().GetServerSideValidation())
+	require.Equal(t, builderv0.KubernetesManifestValidation_STATUS_NOT_RUN, output.GetValidation().GetServerSideValidation())
 	require.True(t, output.GetValidation().GetPromotable())
 
 	configuration := response.GetConfiguration()
@@ -88,6 +217,7 @@ func TestPromotableGitOpsDeploymentReturnsConfigurationAndIsolatesSecrets(t *tes
 		"name: POSTGRES_USER",
 		"name: POSTGRES_PASSWORD",
 		"name: POSTGRES_DB",
+		`value: "test"`,
 		"optional: false",
 	} {
 		require.Contains(t, statefulSet, expected)
@@ -108,6 +238,8 @@ func TestPromotableGitOpsDeploymentReturnsConfigurationAndIsolatesSecrets(t *tes
 		"name: POSTGRES_USER",
 		"name: POSTGRES_READ_ONLY_PASSWORD",
 		"name: POSTGRES_READ_WRITE_PASSWORD",
+		"name: POSTGRES_DB",
+		`value: "test"`,
 		"name: " + migrationConnectionEnvironmentKey,
 		"optional: false",
 	} {
@@ -116,54 +248,81 @@ func TestPromotableGitOpsDeploymentReturnsConfigurationAndIsolatesSecrets(t *tes
 	for _, unexpected := range []string{
 		"envFrom:",
 		"name: POSTGRES_PASSWORD",
-		"name: POSTGRES_DB",
 		"name: UNRELATED_SECRET",
 	} {
 		require.NotContains(t, job, unexpected)
 	}
 }
 
+func TestPromotableGitOpsDeploymentReportsExplicitValidationContext(t *testing.T) {
+	useSuccessfulKubectl(t)
+	builder, networkMappings := newDeploymentTestBuilder(t)
+	request := promotableDeploymentRequest(
+		t.TempDir(),
+		networkMappings,
+		promotablePostgresSecretReferences(),
+	)
+	kubernetes := request.GetDeployment().GetKubernetes()
+	kubernetes.ValidateServerSide = true
+	kubernetes.ValidationKubeconfig = "/tmp/codefly-test-kubeconfig"
+	kubernetes.ValidationContext = "k3d-codefly-test"
+
+	response, err := builder.Deploy(context.Background(), request)
+	require.NoError(t, err)
+	require.Equal(t, builderv0.DeploymentStatus_SUCCESS, response.GetState().GetState(), response.GetState().GetMessage())
+	validation := response.GetDeployment().GetKubernetes().GetValidation()
+	require.Equal(t, builderv0.KubernetesManifestValidation_STATUS_PASSED, validation.GetServerSideValidation())
+	require.Equal(t, "k3d-codefly-test", validation.GetValidatedContext())
+	require.True(t, validation.GetPromotable())
+}
+
 func TestPromotableGitOpsDeploymentRejectsMissingOrOptionalRequiredSecretReferences(t *testing.T) {
 	required := []string{
 		"POSTGRES_USER",
 		"POSTGRES_PASSWORD",
-		"POSTGRES_DB",
 		"POSTGRES_READ_ONLY_PASSWORD",
 		"POSTGRES_READ_WRITE_PASSWORD",
-		migrationConnectionEnvironmentKey,
 	}
 	for _, environmentVariable := range required {
 		t.Run("missing/"+environmentVariable, func(t *testing.T) {
 			builder, networkMappings := newDeploymentTestBuilder(t)
 			references := promotablePostgresSecretReferences()
-			delete(references, environmentVariable)
+			configurationKey := resources.ServiceSecretConfigurationKeyFromUnique(
+				builder.Unique(),
+				"postgres",
+				environmentVariable,
+			)
+			delete(references, configurationKey)
 
 			response, err := builder.Deploy(context.Background(), promotableDeploymentRequest(
 				t.TempDir(),
 				networkMappings,
 				references,
-				false,
 			))
 			require.NoError(t, err)
 			require.Equal(t, builderv0.DeploymentStatus_ERROR, response.GetState().GetState())
-			require.Contains(t, response.GetState().GetMessage(), "requires a typed Kubernetes Secret reference for "+environmentVariable)
+			require.Contains(t, response.GetState().GetMessage(), "requires a typed Kubernetes Secret reference for "+configurationKey)
 			require.Nil(t, response.GetConfiguration())
 		})
 
 		t.Run("optional/"+environmentVariable, func(t *testing.T) {
 			builder, networkMappings := newDeploymentTestBuilder(t)
 			references := promotablePostgresSecretReferences()
-			references[environmentVariable].Optional = true
+			configurationKey := resources.ServiceSecretConfigurationKeyFromUnique(
+				builder.Unique(),
+				"postgres",
+				environmentVariable,
+			)
+			references[configurationKey].Optional = true
 
 			response, err := builder.Deploy(context.Background(), promotableDeploymentRequest(
 				t.TempDir(),
 				networkMappings,
 				references,
-				false,
 			))
 			require.NoError(t, err)
 			require.Equal(t, builderv0.DeploymentStatus_ERROR, response.GetState().GetState())
-			require.Contains(t, response.GetState().GetMessage(), environmentVariable+" Kubernetes Secret reference must not be optional")
+			require.Contains(t, response.GetState().GetMessage(), configurationKey+" Kubernetes Secret reference must not be optional")
 			require.Nil(t, response.GetConfiguration())
 		})
 	}
@@ -174,17 +333,18 @@ func newDeploymentTestBuilder(t *testing.T) (*Builder, []*basev0.NetworkMapping)
 	ctx := context.Background()
 	builder := NewBuilder()
 	identity := &basev0.ServiceIdentity{
-		Name:      "postgres",
-		Module:    "module",
 		Workspace: "workspace",
+		Module:    "module",
+		Name:      "postgres",
 		Version:   "1.2.3",
 	}
-	require.NoError(t, builder.Base.HeadlessLoad(ctx, identity))
-	builder.Base.Information = &services.Information{
+	require.NoError(t, builder.HeadlessLoad(ctx, identity))
+	builder.Information = &services.Information{
 		Service: resources.ToServiceWithCase(builder.Identity),
 		Module:  resources.ToModuleWithCase(builder.Identity),
 	}
 	builder.EnvironmentVariables.SetIdentity(identity)
+	builder.DatabaseName = "test"
 	builder.TcpEndpoint = &basev0.Endpoint{
 		Name:    "tcp",
 		Module:  identity.Module,
@@ -203,7 +363,6 @@ func promotableDeploymentRequest(
 	destination string,
 	networkMappings []*basev0.NetworkMapping,
 	secretReferences map[string]*builderv0.KubernetesSecretKeyReference,
-	validateServerSide bool,
 ) *builderv0.DeploymentRequest {
 	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	return &builderv0.DeploymentRequest{
@@ -212,12 +371,11 @@ func promotableDeploymentRequest(
 		Deployment: &builderv0.Deployment{
 			Kind: &builderv0.Deployment_Kubernetes{
 				Kubernetes: &builderv0.KubernetesDeployment{
-					Namespace:          "codefly-test",
-					Destination:        destination,
-					BuildContext:       &builderv0.DockerBuildContext{DockerRepository: "registry.example.com", ImageDigest: digest},
-					Profile:            builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1,
-					SecretReferences:   secretReferences,
-					ValidateServerSide: validateServerSide,
+					Namespace:        "codefly-test",
+					Destination:      destination,
+					BuildContext:     &builderv0.DockerBuildContext{DockerRepository: "registry.example.com", ImageDigest: digest},
+					Profile:          builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1,
+					SecretReferences: secretReferences,
 				},
 			},
 		},
@@ -225,36 +383,26 @@ func promotableDeploymentRequest(
 }
 
 func promotablePostgresSecretReferences() map[string]*builderv0.KubernetesSecretKeyReference {
-	return map[string]*builderv0.KubernetesSecretKeyReference{
-		"POSTGRES_USER": {
-			Name: "postgres-stateful-set",
-			Key:  "username",
-		},
-		"POSTGRES_PASSWORD": {
-			Name: "postgres-stateful-set",
-			Key:  "password",
-		},
-		"POSTGRES_DB": {
-			Name: "postgres-stateful-set",
-			Key:  "database",
-		},
-		"POSTGRES_READ_ONLY_PASSWORD": {
-			Name: "postgres-bootstrap",
-			Key:  "read-only-password",
-		},
-		"POSTGRES_READ_WRITE_PASSWORD": {
-			Name: "postgres-bootstrap",
-			Key:  "read-write-password",
-		},
-		migrationConnectionEnvironmentKey: {
-			Name: "postgres-bootstrap",
-			Key:  "migration-connection",
-		},
-		"UNRELATED_SECRET": {
-			Name: "unrelated-secret",
-			Key:  "token",
-		},
+	references := map[string]*builderv0.KubernetesSecretKeyReference{
+		"UNRELATED_SECRET": {Name: "unrelated-secret", Key: "token"},
 	}
+	for _, environmentVariable := range []string{
+		"POSTGRES_USER",
+		"POSTGRES_PASSWORD",
+		"POSTGRES_READ_ONLY_PASSWORD",
+		"POSTGRES_READ_WRITE_PASSWORD",
+	} {
+		configurationKey := resources.ServiceSecretConfigurationKeyFromUnique(
+			"module/postgres",
+			"postgres",
+			environmentVariable,
+		)
+		references[configurationKey] = &builderv0.KubernetesSecretKeyReference{
+			Name: "postgres-secrets",
+			Key:  configurationKey,
+		}
+	}
+	return references
 }
 
 func useSuccessfulKubectl(t *testing.T) {
@@ -263,14 +411,6 @@ func useSuccessfulKubectl(t *testing.T) {
 	kubectl := filepath.Join(bin, "kubectl")
 	require.NoError(t, os.WriteFile(kubectl, []byte("#!/bin/sh\ncat >/dev/null\n"), 0o755))
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
-
-func assertMigrationResource(t *testing.T, dir string, expected bool) {
-	t.Helper()
-	content := readDeploymentFile(t, dir, "base", "kustomization.yaml")
-	if got := strings.Contains(content, "- job.yaml"); got != expected {
-		t.Fatalf("migration resource present = %t, want %t:\n%s", got, expected, content)
-	}
 }
 
 func assertEphemeralSecret(t *testing.T, dir string) {

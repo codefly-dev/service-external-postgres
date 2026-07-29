@@ -13,6 +13,8 @@ func TestReleaseBackfillUsesRequestedTagWhenCommitHasMultipleTags(t *testing.T) 
 	runTestCommand(t, repository, nil, "git", "init", "--quiet")
 	runTestCommand(t, repository, nil, "git", "config", "user.name", "Test")
 	runTestCommand(t, repository, nil, "git", "config", "user.email", "test@example.com")
+	runTestCommand(t, repository, nil, "git", "config", "commit.gpgsign", "false")
+	runTestCommand(t, repository, nil, "git", "config", "tag.gpgsign", "false")
 	if err := os.WriteFile(filepath.Join(repository, "service"), []byte("postgres"), 0o644); err != nil {
 		t.Fatal(err)
 	}
