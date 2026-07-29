@@ -83,7 +83,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	s.NetworkMappings = req.ProposedNetworkMappings
 
-	s.Configuration = req.Configuration
+	configuration := req.GetConfiguration()
 
 	net, err := resources.FindNetworkMapping(ctx, s.NetworkMappings, s.TcpEndpoint)
 	if err != nil {
@@ -116,7 +116,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	// Create connection string resources for the network instance
 	for _, inst := range net.Instances {
-		conf, errConn := s.CreateConnectionConfiguration(ctx, s.Configuration, inst, false)
+		conf, errConn := s.CreateConnectionConfiguration(ctx, configuration, inst, false)
 		if errConn != nil {
 			return s.Runtime.InitError(errConn)
 		}
@@ -133,13 +133,13 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 
 	}
 
-	s.connection, err = s.createOwnerConnectionString(ctx, s.Configuration, hostInstance.Address, false)
+	s.connection, err = s.createOwnerConnectionString(ctx, configuration, hostInstance.Address, false)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
 
 	// Configuration (postgres user/password) is needed by both runtimes.
-	err = s.LoadConfiguration(ctx, s.Configuration)
+	err = s.LoadConfiguration(ctx, configuration)
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
