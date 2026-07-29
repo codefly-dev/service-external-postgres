@@ -38,6 +38,9 @@ func TestBootstrapImageAlwaysReconcilesRuntimeAccess(t *testing.T) {
 			) {
 				t.Fatal("bootstrap image does not wait for Postgres readiness")
 			}
+			if !strings.Contains(dockerfile, "/releases/download/v4.19.1/migrate.linux-amd64.tar.gz") {
+				t.Fatal("bootstrap image does not pin the supported migration runtime")
+			}
 			hasMigration := strings.Contains(dockerfile, "/usr/local/bin/migrate -path")
 			if hasMigration != test.withMigrations {
 				t.Fatalf("migration command present = %t, want %t", hasMigration, test.withMigrations)

@@ -3,7 +3,7 @@ FROM alpine:3.21
 WORKDIR /app
 
 RUN apk add --no-cache curl postgresql17-client
-RUN curl -L https://github.com/golang-migrate/migrate/releases/download/v4.15.0/migrate.linux-amd64.tar.gz | tar xvz
+RUN curl -L https://github.com/golang-migrate/migrate/releases/download/v4.19.1/migrate.linux-amd64.tar.gz | tar xvz
 RUN mv migrate /usr/local/bin/migrate
 
 COPY . .
