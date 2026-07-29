@@ -6,7 +6,6 @@ metadata:
   labels:
     codefly.dev/bootstrap-service: {{ .Service.Name.DNSCase }}
 spec:
-  ttlSecondsAfterFinished: 0
   backoffLimit: 4
   template:
     metadata:
