@@ -102,6 +102,13 @@ func TestPromotableGitOpsDeploymentReturnsReferenceOnlyConfigurationAndScopesSec
 		require.NotEqual(t, ownerConnectionKey, value.GetKey())
 	}
 
+	baseKustomization := readDeploymentFile(t, destination, "base", "kustomization.yaml")
+	require.NotContains(t, baseKustomization, "namespace.yaml")
+	overlayKustomization := readDeploymentFile(t, destination, "overlays", "test", "kustomization.yaml")
+	require.NotContains(t, overlayKustomization, "secret.yaml")
+	require.Empty(t, strings.TrimSpace(readDeploymentFile(t, destination, "base", "namespace.yaml")))
+	require.Empty(t, strings.TrimSpace(readDeploymentFile(t, destination, "overlays", "test", "secret.yaml")))
+
 	statefulSet := readDeploymentFile(t, destination, "base", "stateful-set.yaml")
 	for _, expected := range []string{
 		image.FullName(),
