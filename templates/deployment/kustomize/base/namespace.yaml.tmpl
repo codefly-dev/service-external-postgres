@@ -4,6 +4,6 @@ kind: Namespace
 metadata:
   name: "{{ .Namespace }}"
   labels:
-    istio-injection: "enabled"
     app.kubernetes.io/managed-by: codefly
+    istio-injection: "enabled"
 {{- end }}

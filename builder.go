@@ -183,6 +183,9 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 			ManagedImage:  s.dockerImage().FullName(),
 		},
 		Prepare: func(ctx context.Context, deployment *services.KustomizeDeploymentContext) error {
+			if deployment.Profile == builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1 {
+				return nil
+			}
 			instance, err := resources.FindNetworkInstanceInNetworkMappings(ctx, req.GetNetworkMappings(), s.TcpEndpoint, resources.NewPublicNetworkAccess())
 			if err != nil {
 				return err

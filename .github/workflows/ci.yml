@@ -18,7 +18,7 @@ jobs:
     needs: image
     permissions:
       contents: read
-    uses: codefly-dev/core/.github/workflows/go-service-ci.yml@25e267bc5b7e346ef6b8439c9a032f115c4795a6
+    uses: codefly-dev/core/.github/workflows/go-service-ci.yml@f16e045805dbd213cdbebf98d5f7cbe802496d7c
 
   image:
     permissions:
@@ -103,7 +103,10 @@ jobs:
           smoke service-postgres-root
           smoke service-postgres-nonroot \
             --user 70:70 \
-            --tmpfs /var/lib/postgresql/data:uid=70,gid=70
+            --read-only \
+            --tmpfs /var/lib/postgresql/data:uid=70,gid=70 \
+            --tmpfs /var/run/postgresql:uid=70,gid=70 \
+            --tmpfs /tmp:uid=70,gid=70
 
       - name: Log in to GitHub Container Registry
         if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
