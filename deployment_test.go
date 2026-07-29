@@ -54,11 +54,8 @@ func TestEphemeralDeploymentRetainsValueBasedConfigurationAndSecret(t *testing.T
 
 func assertMigrationResource(t *testing.T, dir string, expected bool) {
 	t.Helper()
-	content, err := os.ReadFile(filepath.Join(dir, "base", "kustomization.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.Contains(string(content), "- job.yaml"); got != expected {
+	content := readDeploymentFile(t, dir, "base", "kustomization.yaml")
+	if got := strings.Contains(content, "- job.yaml"); got != expected {
 		t.Fatalf("migration resource present = %t, want %t:\n%s", got, expected, content)
 	}
 }
@@ -144,6 +141,28 @@ func TestPromotableGitOpsDeploymentReturnsReferenceOnlyConfigurationAndScopesSec
 	} {
 		require.NotContains(t, job, unexpected)
 	}
+}
+
+func TestPromotableGitOpsDeploymentReportsExplicitValidationContext(t *testing.T) {
+	useSuccessfulKubectl(t)
+	builder, networkMappings := newDeploymentTestBuilder(t)
+	request := promotableDeploymentRequest(
+		t.TempDir(),
+		networkMappings,
+		promotablePostgresSecretReferences(),
+	)
+	kubernetes := request.GetDeployment().GetKubernetes()
+	kubernetes.ValidateServerSide = true
+	kubernetes.ValidationKubeconfig = "/tmp/codefly-test-kubeconfig"
+	kubernetes.ValidationContext = "k3d-codefly-test"
+
+	response, err := builder.Deploy(context.Background(), request)
+	require.NoError(t, err)
+	require.Equal(t, builderv0.DeploymentStatus_SUCCESS, response.GetState().GetState(), response.GetState().GetMessage())
+	validation := response.GetDeployment().GetKubernetes().GetValidation()
+	require.Equal(t, builderv0.KubernetesManifestValidation_STATUS_PASSED, validation.GetServerSideValidation())
+	require.Equal(t, "k3d-codefly-test", validation.GetValidatedContext())
+	require.True(t, validation.GetPromotable())
 }
 
 func TestPromotableGitOpsDeploymentRejectsMissingOrOptionalRequiredSecretReferences(t *testing.T) {
@@ -274,6 +293,14 @@ func promotablePostgresSecretReferences() map[string]*builderv0.KubernetesSecret
 			Key:  "token",
 		},
 	}
+}
+
+func useSuccessfulKubectl(t *testing.T) {
+	t.Helper()
+	bin := t.TempDir()
+	kubectl := filepath.Join(bin, "kubectl")
+	require.NoError(t, os.WriteFile(kubectl, []byte("#!/bin/sh\ncat >/dev/null\n"), 0o755))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 func assertEphemeralSecret(t *testing.T, dir string) {

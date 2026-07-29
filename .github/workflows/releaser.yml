@@ -61,7 +61,7 @@ jobs:
     needs: image
     permissions:
       contents: read
-    uses: codefly-dev/core/.github/workflows/go-service-release.yml@25e267bc5b7e346ef6b8439c9a032f115c4795a6
+    uses: codefly-dev/core/.github/workflows/go-service-release.yml@f16e045805dbd213cdbebf98d5f7cbe802496d7c
     secrets: inherit
 
   backfill:

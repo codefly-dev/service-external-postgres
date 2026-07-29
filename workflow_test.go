@@ -41,6 +41,11 @@ func TestCIWorkflowValidatesLockedImageForEveryPullRequest(t *testing.T) {
 	unitTests := findWorkflowStep(t, workflow.Jobs["image"], "Run unit tests")
 	require.Empty(t, unitTests.If)
 
+	smoke := findWorkflowStep(t, workflow.Jobs["image"], "Smoke test runtime image")
+	require.Contains(t, smoke.Run, "--read-only")
+	require.Contains(t, smoke.Run, "--tmpfs /var/run/postgresql:uid=70,gid=70")
+	require.Contains(t, smoke.Run, "--tmpfs /tmp:uid=70,gid=70")
+
 	verify := findWorkflowStep(t, workflow.Jobs["image"], "Verify published runtime image")
 	require.Contains(t, verify.Run, `--config "$anonymous_docker_config"`)
 	require.Contains(t, verify.Run, `"$RUNTIME_IMAGE"`)
