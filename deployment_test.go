@@ -252,7 +252,8 @@ func TestPromotableGitOpsDeploymentReturnsReferenceOnlyConfigurationAndScopesSec
 	} {
 		require.Contains(t, job, expected)
 	}
-	require.Equal(t, 2, strings.Count(job, "app: postgres"))
+	require.Equal(t, 2, strings.Count(job, "codefly.dev/bootstrap-service: postgres"))
+	require.NotContains(t, job, "app: postgres")
 	for _, unexpected := range []string{
 		"envFrom:",
 		"name: POSTGRES_PASSWORD",

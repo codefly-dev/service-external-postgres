@@ -4,14 +4,14 @@ metadata:
   name: {{ .Service.Name.DNSCase }}
   namespace: {{ .Namespace }}
   labels:
-    app: {{ .Service.Name.DNSCase }}
+    codefly.dev/bootstrap-service: {{ .Service.Name.DNSCase }}
 spec:
   ttlSecondsAfterFinished: 0
   backoffLimit: 4
   template:
     metadata:
       labels:
-        app: {{ .Service.Name.DNSCase }}
+        codefly.dev/bootstrap-service: {{ .Service.Name.DNSCase }}
       annotations:
         sidecar.istio.io/inject: "false"
     spec:
