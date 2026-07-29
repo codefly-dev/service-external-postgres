@@ -234,6 +234,10 @@ func TestPromotableGitOpsDeploymentReturnsReferenceOnlyConfigurationAndScopesSec
 	} {
 		require.NotContains(t, statefulSet, unexpected)
 	}
+	require.Equal(t, 3, strings.Count(
+		statefulSet,
+		`command: ["/bin/sh", "-ec", "exec pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]`,
+	))
 
 	job := readDeploymentFile(t, destination, "base", "job.yaml")
 	for _, expected := range []string{

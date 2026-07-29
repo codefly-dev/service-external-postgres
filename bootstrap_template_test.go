@@ -32,6 +32,12 @@ func TestBootstrapImageAlwaysReconcilesRuntimeAccess(t *testing.T) {
 			if !strings.Contains(dockerfile, "psql \"${"+migrationConnectionEnvironmentKey+"}\"") {
 				t.Fatal("bootstrap image does not always reconcile runtime roles")
 			}
+			if !strings.Contains(
+				dockerfile,
+				"until pg_isready -d \"${"+migrationConnectionEnvironmentKey+"}\" >/dev/null 2>&1; do sleep 2; done",
+			) {
+				t.Fatal("bootstrap image does not wait for Postgres readiness")
+			}
 			hasMigration := strings.Contains(dockerfile, "/usr/local/bin/migrate -path")
 			if hasMigration != test.withMigrations {
 				t.Fatalf("migration command present = %t, want %t", hasMigration, test.withMigrations)

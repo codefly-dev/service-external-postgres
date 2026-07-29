@@ -14,5 +14,6 @@ COPY migrations /app/migrations
 COPY builder/runtime-access.sql /app/runtime-access.sql
 
 CMD set -eu; \
+    until pg_isready -d "${{.MigrationConnectionKeyHolder}}" >/dev/null 2>&1; do sleep 2; done; \
 {{ if .WithMigration }}    /usr/local/bin/migrate -path /app/migrations -database "${{.MigrationConnectionKeyHolder}}" up; \
 {{ end }}    psql "${{.MigrationConnectionKeyHolder}}" --no-psqlrc --set=ON_ERROR_STOP=1 --file=/app/runtime-access.sql
