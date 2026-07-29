@@ -89,8 +89,9 @@ spec:
               cpu: "1"
               memory: 1Gi
           # pg_isready is the canonical "is postgres accepting
-          # connections" check. Without -U the env-injected user
-          # is implied. Probes intentionally separated:
+          # connections" check. The shell resolves the secret-backed
+          # database owner and declared database at probe time.
+          # Probes intentionally separated:
           #   startup:    grants up to 60s for first-boot init
           #               (which can run schema migrations).
           #   readiness:  takes the pod out of the Service if
@@ -99,17 +100,17 @@ spec:
           #               momentary connection saturation.
           startupProbe:
             exec:
-              command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "$(POSTGRES_DB)"]
+              command: ["/bin/sh", "-ec", "exec pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
             periodSeconds: 5
             failureThreshold: 12
           readinessProbe:
             exec:
-              command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "$(POSTGRES_DB)"]
+              command: ["/bin/sh", "-ec", "exec pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
             periodSeconds: 10
             timeoutSeconds: 3
           livenessProbe:
             exec:
-              command: ["pg_isready", "-U", "$(POSTGRES_USER)"]
+              command: ["/bin/sh", "-ec", "exec pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 3
