@@ -11,10 +11,51 @@ spec:
       annotations:
         sidecar.istio.io/inject: "false"
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: {{ .Service.Name.DNSCase }}
-          image: image:tag
+          image: {{ .Image }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+{{- if not .GitOps }}
           envFrom:
             - secretRef:
                 name: secret-{{ .Service.Name.DNSCase }}
+{{- end }}
+{{- if .GitOps }}
+          env:
+{{- range $key, $reference := .SecretReferences }}
+            - name: {{ $key }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $reference.Name }}
+                  key: {{ $reference.Key }}
+{{- end }}
+{{- end }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
       restartPolicy: Never

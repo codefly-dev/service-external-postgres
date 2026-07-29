@@ -13,5 +13,5 @@ spec:
   # Headless — clients reach postgres via the StatefulSet pod's stable
   # DNS (<svc>-0.<svc>.<ns>.svc). For prod-style RDS deployments,
   # replace this entire kustomize layer with an ExternalName Service
-  # in the module-level overlay (see saas-starter aws overlay).
+  # in the module-level environment overlay.
   clusterIP: None
