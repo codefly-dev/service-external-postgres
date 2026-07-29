@@ -252,6 +252,7 @@ func TestPromotableGitOpsDeploymentReturnsReferenceOnlyConfigurationAndScopesSec
 	} {
 		require.Contains(t, job, expected)
 	}
+	require.Equal(t, 2, strings.Count(job, "app: postgres"))
 	for _, unexpected := range []string{
 		"envFrom:",
 		"name: POSTGRES_PASSWORD",
