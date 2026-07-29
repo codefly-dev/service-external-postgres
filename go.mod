@@ -5,7 +5,7 @@ go 1.25.12
 toolchain go1.26.4
 
 require (
-	github.com/codefly-dev/core v0.2.51
+	github.com/codefly-dev/core v0.2.52
 	github.com/golang-migrate/migrate/v4 v4.19.1
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/lib/pq v1.12.3
