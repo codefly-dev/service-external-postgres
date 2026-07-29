@@ -63,15 +63,15 @@ spec:
           envFrom:
             - secretRef:
                 name: secret-{{ .Service.Name.DNSCase }}
-{{- end }}
-{{- if .GitOps }}
+{{- else }}
           env:
-{{- range $key, $reference := .SecretReferences }}
-            - name: {{ $key }}
+{{- range $environmentVariable, $reference := .Deployment.Parameters.StatefulSetSecretReferences }}
+            - name: {{ $environmentVariable }}
               valueFrom:
                 secretKeyRef:
                   name: {{ $reference.Name }}
                   key: {{ $reference.Key }}
+                  optional: {{ $reference.Optional }}
 {{- end }}
 {{- end }}
           # Modest defaults — tune in overlay per-tenant. The PSS
