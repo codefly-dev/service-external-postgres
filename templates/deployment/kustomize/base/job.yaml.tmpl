@@ -38,7 +38,7 @@ spec:
                 name: secret-{{ .Service.Name.DNSCase }}
 {{- else }}
           env:
-{{- range $environmentVariable, $reference := .SecretReferences }}
+{{- range $environmentVariable, $reference := .Deployment.Parameters.BootstrapJobSecretReferences }}
             - name: {{ $environmentVariable }}
               valueFrom:
                 secretKeyRef:
