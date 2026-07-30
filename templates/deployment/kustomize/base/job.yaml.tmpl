@@ -35,7 +35,7 @@ spec:
                 - ALL
             seccompProfile:
               type: RuntimeDefault
-{{- if not .GitOps }}
+{{- if not .Restricted }}
           envFrom:
             - secretRef:
                 name: secret-{{ .Service.Name.DNSCase }}

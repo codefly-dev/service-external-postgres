@@ -1,5 +1,5 @@
 resources:
   - ../../base
-{{- if not .GitOps }}
+{{- if not .Restricted }}
   - secret.yaml
 {{- end }}
