@@ -39,9 +39,10 @@ type RuntimeAccess struct {
 	ReconcileReadWriteRoleMemberships bool
 }
 
-// ReconcileRuntimeAccess grants only CONNECT/USAGE/query/DML capabilities,
-// revokes schema creation, installs matching default privileges, and reconciles
-// explicitly configured NOLOGIN roles assumed by the read-write principal.
+// ReconcileRuntimeAccess grants only CONNECT/USAGE/query capabilities, revokes
+// schema creation, and installs matching default privileges. The read-write
+// principal receives direct DML only when no delegated roles are configured;
+// otherwise its exclusive write authority is the reconciled NOLOGIN role set.
 func ReconcileRuntimeAccess(ctx context.Context, executor SQLExecutor, access RuntimeAccess) error {
 	if ctx == nil {
 		return errors.New("runtime-access context is required")
@@ -82,15 +83,19 @@ func ReconcileRuntimeAccess(ctx context.Context, executor SQLExecutor, access Ru
 			`REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA ` + schema + ` FROM ` + readOnly,
 			`REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA ` + schema + ` FROM ` + readWrite,
 			`GRANT SELECT ON ALL TABLES IN SCHEMA ` + schema + ` TO ` + readOnly,
-			`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ` + schema + ` TO ` + readWrite,
-			`GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA ` + schema + ` TO ` + readWrite,
 			`ALTER DEFAULT PRIVILEGES FOR ROLE ` + owner + ` IN SCHEMA ` + schema + ` REVOKE ALL ON TABLES FROM ` + readOnly,
 			`ALTER DEFAULT PRIVILEGES FOR ROLE ` + owner + ` IN SCHEMA ` + schema + ` REVOKE ALL ON TABLES FROM ` + readWrite,
 			`ALTER DEFAULT PRIVILEGES FOR ROLE ` + owner + ` IN SCHEMA ` + schema + ` REVOKE ALL ON SEQUENCES FROM ` + readOnly,
 			`ALTER DEFAULT PRIVILEGES FOR ROLE ` + owner + ` IN SCHEMA ` + schema + ` REVOKE ALL ON SEQUENCES FROM ` + readWrite,
 			`ALTER DEFAULT PRIVILEGES FOR ROLE ` + owner + ` IN SCHEMA ` + schema + ` GRANT SELECT ON TABLES TO ` + readOnly,
-			`ALTER DEFAULT PRIVILEGES FOR ROLE ` + owner + ` IN SCHEMA ` + schema + ` GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ` + readWrite,
-			`ALTER DEFAULT PRIVILEGES FOR ROLE ` + owner + ` IN SCHEMA ` + schema + ` GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO ` + readWrite,
+		}
+		if len(access.ReadWriteRoles) == 0 {
+			statements = append(statements,
+				`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA `+schema+` TO `+readWrite,
+				`GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA `+schema+` TO `+readWrite,
+				`ALTER DEFAULT PRIVILEGES FOR ROLE `+owner+` IN SCHEMA `+schema+` GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO `+readWrite,
+				`ALTER DEFAULT PRIVILEGES FOR ROLE `+owner+` IN SCHEMA `+schema+` GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO `+readWrite,
+			)
 		}
 		for _, statement := range statements {
 			if _, err := executor.ExecContext(ctx, statement); err != nil {

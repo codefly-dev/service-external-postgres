@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/hex"
 	"fmt"
+	"strings"
 
 	"github.com/codefly-dev/core/agents/communicate"
 	dockerhelpers "github.com/codefly-dev/core/agents/helpers/docker"
@@ -186,6 +188,14 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 		Templates:            deploymentFS,
 		Parameters:           parameters,
 		Prepare: func(ctx context.Context, deployment *services.KustomizeDeploymentContext) error {
+			bootstrapJobName, nameErr := immutableBootstrapJobName(
+				s.Identity.Name,
+				deployment.Kubernetes.GetBuildContext().GetImageDigest(),
+			)
+			if nameErr != nil {
+				return nameErr
+			}
+			parameters.BootstrapJobName = bootstrapJobName
 			configuration, prepareErr := s.prepareDeployment(ctx, deployment, parameters)
 			if prepareErr != nil {
 				return prepareErr
@@ -205,6 +215,20 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	}
 	response.Configuration = promotableConfiguration
 	return response, nil
+}
+
+func immutableBootstrapJobName(service, imageDigest string) (string, error) {
+	algorithm, encoded, found := strings.Cut(imageDigest, ":")
+	decoded, err := hex.DecodeString(encoded)
+	if !found || algorithm != "sha256" || err != nil || len(decoded) != 32 {
+		return "", fmt.Errorf("bootstrap image digest must be a sha256 digest")
+	}
+	const suffixLength = 12
+	const maxServiceLength = 63 - 1 - suffixLength
+	if len(service) > maxServiceLength {
+		service = strings.TrimRight(service[:maxServiceLength], "-")
+	}
+	return service + "-" + encoded[:suffixLength], nil
 }
 
 func (s *Builder) prepareDeployment(

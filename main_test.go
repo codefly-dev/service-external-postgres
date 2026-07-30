@@ -267,6 +267,21 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 	require.False(t, found, "tenant-b workload must not see tenant-a data")
 	require.Error(t, repository.Put(workloadB.Context(ctx), "blocked", "value"), "read-only workload must not obtain a writer")
 
+	const delegatedWriter = "app_writer"
+	require.NoError(t, owner.InstallDelegatedWriteRole(ctx, delegatedWriter, serviceName))
+	runtime.Settings.RuntimeReadWriteRoles = []string{delegatedWriter}
+	require.NoError(t, runtime.ensureRuntimeAccess(ctx))
+	require.Error(
+		t,
+		writer.AppendFixture(ctx, serviceName, "00000000-0000-0000-0000-000000000004"),
+		"delegated writer must not retain direct table authority",
+	)
+	require.NoError(
+		t,
+		writer.AppendFixtureAsRole(ctx, delegatedWriter, serviceName, "00000000-0000-0000-0000-000000000005"),
+		"delegated writer must mutate through an explicitly configured role",
+	)
+
 	if runtimeContext.Kind == resources.RuntimeContextContainer {
 		assertDockerStateSurvivesContainerRecreation(
 			t,

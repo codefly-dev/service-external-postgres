@@ -17,8 +17,9 @@ import (
 
 func TestDeploymentTemplatesWithMigration(t *testing.T) {
 	dir := agenttesting.AssertKustomizeTemplates(t, deploymentFS, DeploymentTemplateParameters{
-		WithBootstrap: true,
-		ManagedImage:  image.FullName(),
+		WithBootstrap:    true,
+		ManagedImage:     image.FullName(),
+		BootstrapJobName: "postgres-aaaaaaaaaaaa",
 	})
 	assertMigrationResource(t, dir, true)
 	assertEphemeralSecret(t, dir)
@@ -26,7 +27,8 @@ func TestDeploymentTemplatesWithMigration(t *testing.T) {
 
 func TestDeploymentTemplatesWithoutBootstrap(t *testing.T) {
 	dir := agenttesting.AssertKustomizeTemplates(t, deploymentFS, DeploymentTemplateParameters{
-		ManagedImage: image.FullName(),
+		ManagedImage:     image.FullName(),
+		BootstrapJobName: "postgres-aaaaaaaaaaaa",
 	})
 	assertMigrationResource(t, dir, false)
 }
@@ -241,6 +243,7 @@ func TestPromotableGitOpsDeploymentReturnsReferenceOnlyConfigurationAndScopesSec
 
 	job := readDeploymentFile(t, destination, "base", "job.yaml")
 	for _, expected := range []string{
+		"name: postgres-aaaaaaaaaaaa",
 		"registry.example.com/module/postgres@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		"name: POSTGRES_USER",
 		"name: POSTGRES_READ_ONLY_PASSWORD",
@@ -262,6 +265,27 @@ func TestPromotableGitOpsDeploymentReturnsReferenceOnlyConfigurationAndScopesSec
 	} {
 		require.NotContains(t, job, unexpected)
 	}
+}
+
+func TestPromotableBootstrapJobIdentityChangesWithImageDigest(t *testing.T) {
+	render := func(digest string) string {
+		t.Helper()
+		builder, networkMappings := newDeploymentTestBuilder(t)
+		destination := t.TempDir()
+		request := promotableDeploymentRequest(destination, networkMappings, promotablePostgresSecretReferences())
+		request.GetDeployment().GetKubernetes().BuildContext.ImageDigest = digest
+
+		response, err := builder.Deploy(context.Background(), request)
+		require.NoError(t, err)
+		require.Equal(t, builderv0.DeploymentStatus_SUCCESS, response.GetState().GetState(), response.GetState().GetMessage())
+		return readDeploymentFile(t, destination, "base", "job.yaml")
+	}
+
+	first := render("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	second := render("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	require.Contains(t, first, "name: postgres-aaaaaaaaaaaa")
+	require.Contains(t, second, "name: postgres-bbbbbbbbbbbb")
+	require.NotEqual(t, first, second)
 }
 
 func TestPromotableGitOpsDeploymentReportsExplicitValidationContext(t *testing.T) {

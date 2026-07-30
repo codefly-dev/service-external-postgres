@@ -44,6 +44,21 @@ func (p *postgresCapabilityProbe) AppendTenantFixture(ctx context.Context, relat
 	return err
 }
 
+func (p *postgresCapabilityProbe) AppendFixtureAsRole(ctx context.Context, role, relation, id string) error {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `SET LOCAL ROLE `+pq.QuoteIdentifier(role)); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO `+pq.QuoteIdentifier(relation)+` (id) VALUES ($1)`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (p *postgresCapabilityProbe) HasFixture(ctx context.Context, relation, id string) (bool, error) {
 	var exists bool
 	err := p.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM `+pq.QuoteIdentifier(relation)+` WHERE id = $1)`, id).Scan(&exists)
@@ -84,6 +99,20 @@ func (p *postgresCapabilityProbe) InstallTenantFixture(ctx context.Context, rela
 			` WITH CHECK (tenant_id = current_setting('codefly.current_tenant_id', true))`,
 	}
 	for _, statement := range statements {
+		if _, err := p.db.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *postgresCapabilityProbe) InstallDelegatedWriteRole(ctx context.Context, role, relation string) error {
+	quotedRole := pq.QuoteIdentifier(role)
+	quotedRelation := pq.QuoteIdentifier(relation)
+	for _, statement := range []string{
+		`CREATE ROLE ` + quotedRole + ` NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON ` + quotedRelation + ` TO ` + quotedRole,
+	} {
 		if _, err := p.db.ExecContext(ctx, statement); err != nil {
 			return err
 		}
