@@ -2,10 +2,15 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"text/template"
+	"time"
 )
 
 func TestBootstrapImageAlwaysReconcilesRuntimeAccess(t *testing.T) {
@@ -38,8 +43,18 @@ func TestBootstrapImageAlwaysReconcilesRuntimeAccess(t *testing.T) {
 			) {
 				t.Fatal("bootstrap image does not wait for Postgres readiness")
 			}
-			if !strings.Contains(dockerfile, "/releases/download/v4.19.1/migrate.linux-amd64.tar.gz") {
-				t.Fatal("bootstrap image does not pin the supported migration runtime")
+			for _, required := range []string{
+				"ARG TARGETARCH",
+				`architecture="${TARGETARCH:-$(apk --print-arch)}"`,
+				"x86_64) architecture=amd64",
+				"aarch64) architecture=arm64",
+				`case "${architecture}" in`,
+				"amd64|arm64)",
+				"/releases/download/v4.19.1/migrate.linux-${architecture}.tar.gz",
+			} {
+				if !strings.Contains(dockerfile, required) {
+					t.Fatalf("bootstrap image is not target-architecture portable: missing %q", required)
+				}
 			}
 			hasMigration := strings.Contains(dockerfile, "/usr/local/bin/migrate -path")
 			if hasMigration != test.withMigrations {
@@ -67,6 +82,92 @@ func TestBootstrapImageAlwaysReconcilesRuntimeAccess(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBootstrapImageBuildsWhenDockerOmitsTargetArchitecture(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	parameters := DockerTemplating{
+		MigrationConnectionKeyHolder: "{" + migrationConnectionEnvironmentKey + "}",
+	}
+	if err := os.WriteFile(
+		filepath.Join(root, "Dockerfile"),
+		[]byte(renderBuilderTemplate(t, "templates/builder/Dockerfile.tmpl", parameters)),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	builderDir := filepath.Join(root, "builder")
+	if err := os.MkdirAll(builderDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(builderDir, "runtime-access.sql"), []byte("SELECT 1;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tag := fmt.Sprintf("service-postgres-bootstrap-targetarch-test:%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		_ = exec.Command("docker", "image", "rm", tag).Run()
+	})
+	command := exec.Command("docker", "build", "--build-arg", "TARGETARCH=", "--tag", tag, root)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("legacy Docker build without TARGETARCH failed: %v\n%s", err, output)
+	}
+}
+
+func TestRuntimeAccessTemplateUsesDelegatedRolesAsExclusiveWriteAuthority(t *testing.T) {
+	parameters := DockerTemplating{
+		MigrationConnectionKeyHolder: "{" + migrationConnectionEnvironmentKey + "}",
+		ReadOnlyRole:                 "codefly_app_ro",
+		ReadWriteRole:                "codefly_app_rw",
+		Schemas:                      []string{"public"},
+		ReadWriteRoles:               []string{"app_tenant", "app_worker"},
+	}
+
+	accessSQL := renderBuilderTemplate(t, "templates/builder/runtime-access.sql.tmpl", parameters)
+	for _, forbidden := range []string{
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES",
+		"GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES",
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES",
+		"GRANT USAGE, SELECT, UPDATE ON SEQUENCES",
+	} {
+		if strings.Contains(accessSQL, forbidden) {
+			t.Fatalf("delegated read-write login retained direct authority %q", forbidden)
+		}
+	}
+	for _, required := range []string{
+		"REVOKE ALL PRIVILEGES ON ALL TABLES",
+		"REVOKE ALL PRIVILEGES ON ALL SEQUENCES",
+		"GRANT %I TO %I",
+		"app_tenant",
+		"app_worker",
+	} {
+		if !strings.Contains(accessSQL, required) {
+			t.Fatalf("delegated runtime access is missing %q", required)
+		}
+	}
+}
+
+func TestRuntimeAccessTemplatePreservesDirectWriterWithoutDelegatedRoles(t *testing.T) {
+	parameters := DockerTemplating{
+		MigrationConnectionKeyHolder: "{" + migrationConnectionEnvironmentKey + "}",
+		ReadOnlyRole:                 "codefly_app_ro",
+		ReadWriteRole:                "codefly_app_rw",
+		Schemas:                      []string{"public"},
+	}
+
+	accessSQL := renderBuilderTemplate(t, "templates/builder/runtime-access.sql.tmpl", parameters)
+	for _, required := range []string{
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES",
+		"GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES",
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES",
+		"GRANT USAGE, SELECT, UPDATE ON SEQUENCES",
+	} {
+		if !strings.Contains(accessSQL, required) {
+			t.Fatalf("direct runtime access is missing %q", required)
+		}
 	}
 }
 

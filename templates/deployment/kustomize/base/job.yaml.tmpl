@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ .Service.Name.DNSCase }}
+  name: {{ .Deployment.Parameters.BootstrapJobName }}
   namespace: {{ .Namespace }}
   labels:
     codefly.dev/bootstrap-service: {{ .Service.Name.DNSCase }}
@@ -35,7 +35,7 @@ spec:
                 - ALL
             seccompProfile:
               type: RuntimeDefault
-{{- if not .GitOps }}
+{{- if not .Restricted }}
           envFrom:
             - secretRef:
                 name: secret-{{ .Service.Name.DNSCase }}

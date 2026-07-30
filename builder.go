@@ -1,9 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"fmt"
+	"io/fs"
+	"strings"
+	"text/template"
 
 	"github.com/codefly-dev/core/agents/communicate"
 	dockerhelpers "github.com/codefly-dev/core/agents/helpers/docker"
@@ -16,6 +22,7 @@ import (
 	"github.com/codefly-dev/core/agents/services/upgrade"
 	builderv0 "github.com/codefly-dev/core/generated/go/codefly/services/builder/v0"
 	"github.com/codefly-dev/core/shared"
+	"gopkg.in/yaml.v3"
 )
 
 type Builder struct {
@@ -180,7 +187,7 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 		ManagedImage:  s.dockerImage().FullName(),
 		DatabaseName:  s.DatabaseName,
 	}
-	var promotableConfiguration *v0.Configuration
+	var restrictedConfiguration *v0.Configuration
 	response, err := s.Builder.DeployKustomize(ctx, req, services.KustomizeDeployment{
 		EnvironmentVariables: s.EnvironmentVariables,
 		Templates:            deploymentFS,
@@ -190,9 +197,14 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 			if prepareErr != nil {
 				return prepareErr
 			}
+			bootstrapJobName, nameErr := s.immutableBootstrapJobName(deployment, parameters)
+			if nameErr != nil {
+				return nameErr
+			}
+			parameters.BootstrapJobName = bootstrapJobName
 			s.Wool.Debug("exporting configuration", wool.Field("conf", resources.MakeConfigurationSummary(configuration)))
-			if deployment.Profile == builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1 {
-				promotableConfiguration = configuration
+			if services.IsRestrictedOutputProfile(deployment.Profile) {
+				restrictedConfiguration = configuration
 				return nil
 			}
 			return deployment.ExportConfiguration(ctx, configuration)
@@ -200,11 +212,69 @@ func (s *Builder) Deploy(ctx context.Context, req *builderv0.DeploymentRequest) 
 	})
 	if err != nil ||
 		response.GetState().GetState() != builderv0.DeploymentStatus_SUCCESS ||
-		promotableConfiguration == nil {
+		restrictedConfiguration == nil {
 		return response, err
 	}
-	response.Configuration = promotableConfiguration
+	response.Configuration = restrictedConfiguration
 	return response, nil
+}
+
+const bootstrapJobTemplatePath = "templates/deployment/kustomize/base/job.yaml.tmpl"
+
+func (s *Builder) immutableBootstrapJobName(
+	deployment *services.KustomizeDeploymentContext,
+	parameters *DeploymentTemplateParameters,
+) (string, error) {
+	service := shared.ToDNSCase(s.Identity.Name)
+	if service == "" {
+		return "", fmt.Errorf("bootstrap service name is required")
+	}
+
+	source, err := fs.ReadFile(deploymentFS, bootstrapJobTemplatePath)
+	if err != nil {
+		return "", fmt.Errorf("read bootstrap Job template: %w", err)
+	}
+	jobTemplate, err := template.New(bootstrapJobTemplatePath).Parse(string(source))
+	if err != nil {
+		return "", fmt.Errorf("parse bootstrap Job template: %w", err)
+	}
+	renderContext := &services.DeploymentWrapper{
+		DeploymentBase: &services.DeploymentBase{
+			Information: s.Information,
+			Namespace:   deployment.Kubernetes.GetNamespace(),
+			Image:       s.DockerImage(deployment.Kubernetes.GetBuildContext()),
+			Profile:     deployment.Profile,
+			Restricted:  services.IsRestrictedOutputProfile(deployment.Profile),
+		},
+		Deployment: services.DeploymentParameters{Parameters: parameters},
+	}
+	var rendered bytes.Buffer
+	if err = jobTemplate.Execute(&rendered, renderContext); err != nil {
+		return "", fmt.Errorf("render bootstrap Job template: %w", err)
+	}
+	var job struct {
+		Spec struct {
+			Template yaml.Node `yaml:"template"`
+		} `yaml:"spec"`
+	}
+	if err = yaml.Unmarshal(rendered.Bytes(), &job); err != nil {
+		return "", fmt.Errorf("parse rendered bootstrap Job: %w", err)
+	}
+	if job.Spec.Template.Kind == 0 {
+		return "", fmt.Errorf("rendered bootstrap Job is missing spec.template")
+	}
+	podTemplate, err := yaml.Marshal(&job.Spec.Template)
+	if err != nil {
+		return "", fmt.Errorf("encode bootstrap Job pod template: %w", err)
+	}
+	contentDigest := sha256.Sum256(podTemplate)
+
+	const suffixLength = 12
+	const maxServiceLength = 63 - 1 - suffixLength
+	if len(service) > maxServiceLength {
+		service = strings.TrimRight(service[:maxServiceLength], "-")
+	}
+	return service + "-" + hex.EncodeToString(contentDigest[:])[:suffixLength], nil
 }
 
 func (s *Builder) prepareDeployment(
@@ -222,7 +292,7 @@ func (s *Builder) prepareDeployment(
 	if err != nil {
 		return nil, err
 	}
-	if deployment.Profile == builderv0.KubernetesOutputProfile_KUBERNETES_OUTPUT_PROFILE_PROMOTABLE_GITOPS_V1 {
+	if services.IsRestrictedOutputProfile(deployment.Profile) {
 		workloadReferences, referencesErr := s.selectPromotableSecretReferences(
 			deployment.Kubernetes.GetSecretReferences(),
 		)

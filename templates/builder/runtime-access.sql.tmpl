@@ -56,10 +56,12 @@ SELECT format('REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %I FROM %I', '{{
 \gexec
 SELECT format('GRANT SELECT ON ALL TABLES IN SCHEMA %I TO %I', '{{ . }}', '{{ $.ReadOnlyRole }}')
 \gexec
+{{- if not $.ReadWriteRoles }}
 SELECT format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %I TO %I', '{{ . }}', '{{ $.ReadWriteRole }}')
 \gexec
 SELECT format('GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA %I TO %I', '{{ . }}', '{{ $.ReadWriteRole }}')
 \gexec
+{{- end }}
 
 SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL ON TABLES FROM %I', :'owner_user', '{{ . }}', '{{ $.ReadOnlyRole }}')
 \gexec
@@ -71,14 +73,16 @@ SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL ON S
 \gexec
 SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT SELECT ON TABLES TO %I', :'owner_user', '{{ . }}', '{{ $.ReadOnlyRole }}')
 \gexec
+{{- if not $.ReadWriteRoles }}
 SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %I', :'owner_user', '{{ . }}', '{{ $.ReadWriteRole }}')
 \gexec
 SELECT format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO %I', :'owner_user', '{{ . }}', '{{ $.ReadWriteRole }}')
 \gexec
 {{- end }}
+{{- end }}
 
--- The managed login owns no application capabilities implicitly. Reconcile
--- its SET ROLE allow-list from service configuration on every deployment.
+-- When delegated roles are configured, the managed login owns no write
+-- capabilities directly. Reconcile its SET ROLE allow-list on every deployment.
 SELECT format('REVOKE %I FROM %I', granted.rolname, '{{ .ReadWriteRole }}')
 FROM pg_auth_members membership
 JOIN pg_roles granted ON granted.oid = membership.roleid

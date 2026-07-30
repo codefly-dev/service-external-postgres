@@ -1,5 +1,5 @@
 resources:
-{{- if not .GitOps }}
+{{- if not .Restricted }}
   - namespace.yaml
 {{- end }}
   # In-cluster postgres (local-mode). For prod where the database is

@@ -66,9 +66,11 @@ type Settings struct {
 
 	// RuntimeReadWriteRoles is the explicit allow-list of application-defined
 	// NOLOGIN roles that the managed read-write principal may assume with
-	// SET ROLE. The roles must be created by migrations. This lets an
-	// application keep request, worker, and RLS capabilities in its own schema
-	// contract without exporting the database-owner credential.
+	// SET ROLE. When non-empty, these roles are the principal's exclusive source
+	// of DML authority; the managed login receives no direct table or sequence
+	// grants. The roles must be created by migrations. This lets an application
+	// keep request, worker, and RLS capabilities in its own schema contract
+	// without exporting the database-owner credential.
 	RuntimeReadWriteRoles []string `yaml:"runtime-read-write-roles"`
 
 	// MigrationSources lets SEVERAL services share this ONE database while each
@@ -142,6 +144,7 @@ func parseRuntimeImageLock(content []byte) (*resources.DockerImage, error) {
 type DeploymentTemplateParameters struct {
 	WithBootstrap                bool
 	ManagedImage                 string
+	BootstrapJobName             string
 	DatabaseName                 string
 	StatefulSetSecretReferences  map[string]*builderv0.KubernetesSecretKeyReference
 	BootstrapJobSecretReferences map[string]*builderv0.KubernetesSecretKeyReference
