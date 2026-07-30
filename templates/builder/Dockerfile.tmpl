@@ -5,11 +5,14 @@ ARG TARGETARCH
 WORKDIR /app
 
 RUN apk add --no-cache curl postgresql17-client
-RUN case "${TARGETARCH}" in \
+RUN architecture="${TARGETARCH:-$(apk --print-arch)}" \
+    && case "${architecture}" in \
+      x86_64) architecture=amd64 ;; \
+      aarch64) architecture=arm64 ;; \
       amd64|arm64) ;; \
-      *) echo "unsupported target architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+      *) echo "unsupported target architecture: ${architecture}" >&2; exit 1 ;; \
     esac \
-    && curl -fsSL "https://github.com/golang-migrate/migrate/releases/download/v4.19.1/migrate.linux-${TARGETARCH}.tar.gz" | tar xz \
+    && curl -fsSL "https://github.com/golang-migrate/migrate/releases/download/v4.19.1/migrate.linux-${architecture}.tar.gz" | tar xz \
     && mv migrate /usr/local/bin/migrate
 
 COPY . .

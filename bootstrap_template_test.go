@@ -2,10 +2,15 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"text/template"
+	"time"
 )
 
 func TestBootstrapImageAlwaysReconcilesRuntimeAccess(t *testing.T) {
@@ -40,9 +45,12 @@ func TestBootstrapImageAlwaysReconcilesRuntimeAccess(t *testing.T) {
 			}
 			for _, required := range []string{
 				"ARG TARGETARCH",
-				`case "${TARGETARCH}" in`,
+				`architecture="${TARGETARCH:-$(apk --print-arch)}"`,
+				"x86_64) architecture=amd64",
+				"aarch64) architecture=arm64",
+				`case "${architecture}" in`,
 				"amd64|arm64)",
-				"/releases/download/v4.19.1/migrate.linux-${TARGETARCH}.tar.gz",
+				"/releases/download/v4.19.1/migrate.linux-${architecture}.tar.gz",
 			} {
 				if !strings.Contains(dockerfile, required) {
 					t.Fatalf("bootstrap image is not target-architecture portable: missing %q", required)
@@ -74,6 +82,38 @@ func TestBootstrapImageAlwaysReconcilesRuntimeAccess(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBootstrapImageBuildsWhenDockerOmitsTargetArchitecture(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	parameters := DockerTemplating{
+		MigrationConnectionKeyHolder: "{" + migrationConnectionEnvironmentKey + "}",
+	}
+	if err := os.WriteFile(
+		filepath.Join(root, "Dockerfile"),
+		[]byte(renderBuilderTemplate(t, "templates/builder/Dockerfile.tmpl", parameters)),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	builderDir := filepath.Join(root, "builder")
+	if err := os.MkdirAll(builderDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(builderDir, "runtime-access.sql"), []byte("SELECT 1;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tag := fmt.Sprintf("service-postgres-bootstrap-targetarch-test:%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		_ = exec.Command("docker", "image", "rm", tag).Run()
+	})
+	command := exec.Command("docker", "build", "--build-arg", "TARGETARCH=", "--tag", tag, root)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("legacy Docker build without TARGETARCH failed: %v\n%s", err, output)
 	}
 }
 
