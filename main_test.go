@@ -267,9 +267,21 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 	require.False(t, found, "tenant-b workload must not see tenant-a data")
 	require.Error(t, repository.Put(workloadB.Context(ctx), "blocked", "value"), "read-only workload must not obtain a writer")
 
+	runtime.RuntimeReadWriteRoles = []string{"missing_app_writer"}
+	require.ErrorContains(
+		t,
+		runtime.ensureRuntimeAccess(ctx),
+		`configured runtime read-write role "missing_app_writer" does not exist`,
+	)
+	require.NoError(
+		t,
+		writer.AppendFixture(ctx, serviceName, "00000000-0000-0000-0000-000000000006"),
+		"failed delegated-role reconciliation must preserve the writer's prior authority",
+	)
+
 	const delegatedWriter = "app_writer"
 	require.NoError(t, owner.InstallDelegatedWriteRole(ctx, delegatedWriter, serviceName))
-	runtime.Settings.RuntimeReadWriteRoles = []string{delegatedWriter}
+	runtime.RuntimeReadWriteRoles = []string{delegatedWriter}
 	require.NoError(t, runtime.ensureRuntimeAccess(ctx))
 	require.Error(
 		t,

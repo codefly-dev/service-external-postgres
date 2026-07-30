@@ -15,14 +15,6 @@ import (
 	"github.com/lib/pq"
 )
 
-// SQLExecutor is the transaction surface required to reconcile runtime roles.
-// *sql.Tx satisfies it; callers retain ownership of commit and rollback.
-type SQLExecutor interface {
-	ExecContext(context.Context, string, ...any) (sql.Result, error)
-	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-}
-
 // RuntimeAccess describes the least-privilege application roles for one
 // database. Roles must already exist; login-role creation and password rotation
 // remain service-runtime responsibilities.
@@ -43,12 +35,13 @@ type RuntimeAccess struct {
 // schema creation, and installs matching default privileges. The read-write
 // principal receives direct DML only when no delegated roles are configured;
 // otherwise its exclusive write authority is the reconciled NOLOGIN role set.
-func ReconcileRuntimeAccess(ctx context.Context, executor SQLExecutor, access RuntimeAccess) error {
+// The caller owns the transaction and must roll it back on any returned error.
+func ReconcileRuntimeAccess(ctx context.Context, tx *sql.Tx, access RuntimeAccess) error {
 	if ctx == nil {
 		return errors.New("runtime-access context is required")
 	}
-	if executor == nil {
-		return errors.New("runtime-access SQL executor is required")
+	if tx == nil {
+		return errors.New("runtime-access SQL transaction is required")
 	}
 	if err := validateRuntimeAccess(access); err != nil {
 		return err
@@ -65,7 +58,7 @@ func ReconcileRuntimeAccess(ctx context.Context, executor SQLExecutor, access Ru
 		`GRANT CONNECT ON DATABASE ` + database + ` TO ` + readWrite,
 	}
 	for _, statement := range databaseStatements {
-		if _, err := executor.ExecContext(ctx, statement); err != nil {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return err
 		}
 	}
@@ -98,7 +91,7 @@ func ReconcileRuntimeAccess(ctx context.Context, executor SQLExecutor, access Ru
 			)
 		}
 		for _, statement := range statements {
-			if _, err := executor.ExecContext(ctx, statement); err != nil {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
 				return err
 			}
 		}
@@ -106,7 +99,7 @@ func ReconcileRuntimeAccess(ctx context.Context, executor SQLExecutor, access Ru
 	if !access.ReconcileReadWriteRoleMemberships {
 		return nil
 	}
-	return reconcileRuntimeRoleMemberships(ctx, executor, access.ReadWriteRole, access.ReadWriteRoles)
+	return reconcileRuntimeRoleMemberships(ctx, tx, access.ReadWriteRole, access.ReadWriteRoles)
 }
 
 func validateRuntimeAccess(access RuntimeAccess) error {
@@ -137,8 +130,8 @@ func validateRuntimeAccess(access RuntimeAccess) error {
 	return nil
 }
 
-func reconcileRuntimeRoleMemberships(ctx context.Context, executor SQLExecutor, member string, configured []string) error {
-	rows, err := executor.QueryContext(ctx, `
+func reconcileRuntimeRoleMemberships(ctx context.Context, tx *sql.Tx, member string, configured []string) error {
+	rows, err := tx.QueryContext(ctx, `
 		SELECT granted.rolname
 		FROM pg_auth_members membership
 		JOIN pg_roles granted ON granted.oid = membership.roleid
@@ -164,14 +157,14 @@ func reconcileRuntimeRoleMemberships(ctx context.Context, executor SQLExecutor, 
 		return err
 	}
 	for _, role := range current {
-		if _, err := executor.ExecContext(ctx, `REVOKE `+pq.QuoteIdentifier(role)+` FROM `+pq.QuoteIdentifier(member)); err != nil {
+		if _, err := tx.ExecContext(ctx, `REVOKE `+pq.QuoteIdentifier(role)+` FROM `+pq.QuoteIdentifier(member)); err != nil {
 			return err
 		}
 	}
 
 	for _, role := range configured {
 		var canLogin, superuser, createDatabase, createRole bool
-		err := executor.QueryRowContext(ctx, `
+		err := tx.QueryRowContext(ctx, `
 			SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole
 			FROM pg_roles
 			WHERE rolname = $1`, role).Scan(&canLogin, &superuser, &createDatabase, &createRole)
@@ -184,7 +177,7 @@ func reconcileRuntimeRoleMemberships(ctx context.Context, executor SQLExecutor, 
 		if canLogin || superuser || createDatabase || createRole {
 			return fmt.Errorf("configured runtime read-write role %q must be NOLOGIN, NOSUPERUSER, NOCREATEDB, and NOCREATEROLE", role)
 		}
-		if _, err := executor.ExecContext(ctx, `GRANT `+pq.QuoteIdentifier(role)+` TO `+pq.QuoteIdentifier(member)); err != nil {
+		if _, err := tx.ExecContext(ctx, `GRANT `+pq.QuoteIdentifier(role)+` TO `+pq.QuoteIdentifier(member)); err != nil {
 			return err
 		}
 	}

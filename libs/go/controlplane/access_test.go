@@ -2,8 +2,11 @@ package controlplane
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 )
+
+var _ func(context.Context, *sql.Tx, RuntimeAccess) error = ReconcileRuntimeAccess
 
 func TestReconcileRuntimeAccessFailsClosedBeforeSQL(t *testing.T) {
 	valid := RuntimeAccess{
@@ -13,7 +16,7 @@ func TestReconcileRuntimeAccessFailsClosedBeforeSQL(t *testing.T) {
 		t.Fatal("nil context was accepted")
 	}
 	if err := ReconcileRuntimeAccess(context.Background(), nil, valid); err == nil {
-		t.Fatal("nil executor was accepted")
+		t.Fatal("nil transaction was accepted")
 	}
 	for name, mutate := range map[string]func(*RuntimeAccess){
 		"database": func(access *RuntimeAccess) { access.Database = "" },
