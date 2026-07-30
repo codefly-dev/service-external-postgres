@@ -288,6 +288,42 @@ func TestPromotableBootstrapJobIdentityChangesWithImageDigest(t *testing.T) {
 	require.NotEqual(t, first, second)
 }
 
+func TestImmutableBootstrapJobNameIsCanonicalAndBounded(t *testing.T) {
+	const lowerDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const upperDigest = "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+	name, err := immutableBootstrapJobName("Postgres", upperDigest)
+	require.NoError(t, err)
+	require.Equal(t, "postgres-aaaaaaaaaaaa", name)
+
+	name, err = immutableBootstrapJobName(strings.Repeat("a", 64), lowerDigest)
+	require.NoError(t, err)
+	require.Len(t, name, 63)
+	require.Equal(t, strings.Repeat("a", 50)+"-aaaaaaaaaaaa", name)
+}
+
+func TestImmutableBootstrapJobNameRejectsInvalidInputs(t *testing.T) {
+	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	for name, input := range map[string]struct {
+		service string
+		digest  string
+	}{
+		"missing service": {digest: digest},
+		"missing digest":  {service: "postgres"},
+		"wrong algorithm": {
+			service: "postgres",
+			digest:  "sha512:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+		"invalid encoding": {service: "postgres", digest: "sha256:not-a-digest"},
+		"wrong length":     {service: "postgres", digest: "sha256:aaaaaaaaaaaa"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := immutableBootstrapJobName(input.service, input.digest)
+			require.Error(t, err)
+		})
+	}
+}
+
 func TestPromotableGitOpsDeploymentReportsExplicitValidationContext(t *testing.T) {
 	useSuccessfulKubectl(t)
 	builder, networkMappings := newDeploymentTestBuilder(t)

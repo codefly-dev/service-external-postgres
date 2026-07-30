@@ -3,7 +3,7 @@
 This service provisions Postgres as two explicit runtime capabilities:
 
 - `postgres.read-only-connection`: a non-owner `NOBYPASSRLS` role with query-only grants and a read-only transaction default.
-- `postgres.read-write-connection`: a non-owner `NOBYPASSRLS` role with query and DML grants, but no schema creation, database creation, role management, or owner membership.
+- `postgres.read-write-connection`: a non-owner `NOBYPASSRLS` role with no schema creation, database creation, role management, or owner membership. By default it receives query and DML grants directly. When `runtime-read-write-roles` is configured, those explicit `NOLOGIN` roles are its exclusive application authority and callers must select one with `SET ROLE`.
 
 The migration owner is private to the Postgres service and its bootstrap job. It is never exported to dependent services. Newly generated services receive separate owner, reader, and writer secrets. Legacy owner-only services derive stable, domain-separated reader and writer credentials inside the agent so isolated checkouts start without copying developer-local configuration; explicit runtime secrets always take precedence.
 

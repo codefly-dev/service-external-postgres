@@ -180,8 +180,9 @@ func validSQLIdentifier(value string) bool {
 // ensureRuntimeAccess reconciles the least-privilege runtime credentials
 // exported to dependent services. Both roles are non-owner, non-superuser,
 // NOBYPASSRLS principals.
-// The read-only role has SELECT grants only; the read-write role has DML grants
-// but no schema CREATE or role-management authority.
+// The read-only role has SELECT grants only. The read-write role has direct DML
+// only in generic mode; delegated mode grants it only explicit SET ROLE
+// memberships. Neither role has schema CREATE or role-management authority.
 func (s *Runtime) ensureRuntimeAccess(ctx context.Context) error {
 	schemas, err := normalizedRuntimeSchemas(s.Settings.RuntimeSchemas)
 	if err != nil {

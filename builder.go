@@ -223,12 +223,16 @@ func immutableBootstrapJobName(service, imageDigest string) (string, error) {
 	if !found || algorithm != "sha256" || err != nil || len(decoded) != 32 {
 		return "", fmt.Errorf("bootstrap image digest must be a sha256 digest")
 	}
+	service = shared.ToDNSCase(service)
+	if service == "" {
+		return "", fmt.Errorf("bootstrap service name is required")
+	}
 	const suffixLength = 12
 	const maxServiceLength = 63 - 1 - suffixLength
 	if len(service) > maxServiceLength {
 		service = strings.TrimRight(service[:maxServiceLength], "-")
 	}
-	return service + "-" + encoded[:suffixLength], nil
+	return service + "-" + hex.EncodeToString(decoded)[:suffixLength], nil
 }
 
 func (s *Builder) prepareDeployment(
