@@ -387,8 +387,24 @@ func (s *Runtime) Information(ctx context.Context, req *runtimev0.InformationReq
 
 func (s *Runtime) Stop(ctx context.Context, req *runtimev0.StopRequest) (*runtimev0.StopResponse, error) {
 	defer s.Wool.Catch()
+	ctx = s.Wool.Inject(ctx)
 
-	s.Wool.Debug("nothing to stop: keep environment alive")
+	// ARCHITECTURE: Nix postgres is a host process, not a persistent container.
+	// Stop must terminate it while retaining dataDir so validation/CI flows can
+	// release the assigned port and a later Init can safely reuse the cluster.
+	// Leaving it alive makes the next phase launch a second postmaster against
+	// the same port and data directory. Docker retains its historical behavior:
+	// its Codefly-owned stateful container stays available for fast reuse.
+	if s.nixRuntime != nil {
+		if err := s.nixRuntime.Stop(ctx); err != nil {
+			return s.Runtime.StopError(err)
+		}
+		s.nixRuntime = nil
+		s.Wool.Debug("stopped nix postgres runtime; persistent data retained")
+		return s.Runtime.StopResponse()
+	}
+
+	s.Wool.Debug("nothing to stop: keep docker environment alive")
 
 	return s.Runtime.StopResponse()
 }
