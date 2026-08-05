@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/lib/pq"
 )
 
 func TestNewNixPostgresRejectsEmptyPasswordBeforeProvisioning(t *testing.T) {
@@ -44,8 +46,11 @@ func TestInitdbUsesPrivatePasswordFileAndSCRAM(t *testing.T) {
 	}
 }
 
-func TestAdminDSNEncodesCredentials(t *testing.T) {
-	n := &nixPostgres{user: "db user", password: `p@ss:/?#[]`, port: 5432}
+func TestAdminDSNEncodesCredentialsAndTargetsOwnedSocket(t *testing.T) {
+	n := &nixPostgres{
+		user: "db user", password: `p@ss:/?#[]`, port: 5432,
+		socketDir: filepath.Join(t.TempDir(), "private socket"),
+	}
 	parsed, err := url.Parse(n.adminDSN())
 	if err != nil {
 		t.Fatal(err)
@@ -57,7 +62,15 @@ func TestAdminDSNEncodesCredentials(t *testing.T) {
 	if !ok || password != n.password {
 		t.Fatalf("password did not round trip: %q", password)
 	}
-	if parsed.Host != "127.0.0.1:5432" || parsed.Query().Get("sslmode") != "disable" {
+	if parsed.Host != "" || parsed.Query().Get("host") != n.socketDir ||
+		parsed.Query().Get("port") != "5432" || parsed.Query().Get("sslmode") != "disable" {
 		t.Fatalf("unexpected DSN %q", parsed.String())
+	}
+	pqDSN, err := pq.ParseURL(n.adminDSN())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(pqDSN, "host='"+n.socketDir+"'") || !strings.Contains(pqDSN, "port='5432'") {
+		t.Fatalf("lib/pq DSN = %q, want owned socket and port", pqDSN)
 	}
 }

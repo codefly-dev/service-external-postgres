@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -61,6 +60,10 @@ type nixPostgres struct {
 	// cancelled. Cancelled only by Stop.
 	serverCtx    context.Context
 	serverCancel context.CancelFunc
+	// serverExit reports the process's real terminal result. Readiness observes
+	// it so a bind failure cannot be hidden by an unrelated database already
+	// listening on the proposed TCP port.
+	serverExit <-chan error
 	// binDir is the absolute nix store bin dir holding initdb + postgres.
 	// Resolved once after materialization and used for ALL postgres invocations
 	// so PATH contamination (e.g. a system Homebrew postgres) can never make
@@ -150,7 +153,15 @@ func nixRuntimeRoot(baseDir string) (string, error) {
 
 // Init materializes the nix env, initdb's the cluster on first boot, launches
 // postgres in the background, waits for readiness, and creates the database.
-func (n *nixPostgres) Init(ctx context.Context) error {
+func (n *nixPostgres) Init(ctx context.Context) (initErr error) {
+	defer func() {
+		if initErr == nil {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		initErr = errors.Join(initErr, n.Stop(cleanupCtx))
+	}()
 	if err := n.env.Init(ctx); err != nil {
 		return fmt.Errorf("materialize nix postgres env: %w", err)
 	}
@@ -308,17 +319,28 @@ func (n *nixPostgres) startServer(ctx context.Context) error {
 		return fmt.Errorf("start postgres: %w", err)
 	}
 	n.proc = proc
+	exit := make(chan error, 1)
+	go func() {
+		exit <- proc.Wait(context.Background())
+		close(exit)
+	}()
+	n.serverExit = exit
 	return nil
 }
 
+// adminDSN reaches this runtime's private Unix socket. Bootstrap work must not
+// use the public TCP mapping: another backend or stale process can still own
+// that port, and accepting its successful ping would authenticate, migrate,
+// and report readiness for the wrong database.
 func (n *nixPostgres) adminDSN() string {
 	u := &url.URL{
 		Scheme: "postgresql",
 		User:   url.UserPassword(n.user, n.password),
-		Host:   net.JoinHostPort("127.0.0.1", strconv.Itoa(int(n.port))),
 		Path:   "/postgres",
 	}
 	query := u.Query()
+	query.Set("host", n.socketDir)
+	query.Set("port", strconv.Itoa(int(n.port)))
 	query.Set("sslmode", "disable")
 	u.RawQuery = query.Encode()
 	return u.String()
@@ -351,11 +373,21 @@ func (n *nixPostgres) ensureAuthentication(ctx context.Context) error {
 	return nil
 }
 
-// waitReady polls until the server accepts connections.
+// waitReady polls this process's private socket and also observes its exit. A
+// public TCP ping is insufficient because a stale Docker proxy can own the
+// proposed port while the newly launched Nix postgres dies during bind.
 func (n *nixPostgres) waitReady(ctx context.Context) error {
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.NewTimer(30 * time.Second)
+	defer deadline.Stop()
+	retry := time.NewTicker(500 * time.Millisecond)
+	defer retry.Stop()
 	var lastErr error
-	for time.Now().Before(deadline) {
+	for {
+		select {
+		case exitErr := <-n.serverExit:
+			return postgresExitedBeforeReady(exitErr)
+		default:
+		}
 		db, err := sql.Open("postgres", n.adminDSN())
 		if err == nil {
 			pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -363,14 +395,36 @@ func (n *nixPostgres) waitReady(ctx context.Context) error {
 			cancel()
 			_ = db.Close()
 			if lastErr == nil {
-				return nil
+				select {
+				case exitErr := <-n.serverExit:
+					return postgresExitedBeforeReady(exitErr)
+				default:
+					return nil
+				}
 			}
 		} else {
 			lastErr = err
 		}
-		time.Sleep(500 * time.Millisecond)
+		select {
+		case exitErr := <-n.serverExit:
+			return postgresExitedBeforeReady(exitErr)
+		case <-ctx.Done():
+			return fmt.Errorf("wait for postgres readiness: %w", ctx.Err())
+		case <-deadline.C:
+			if lastErr == nil {
+				lastErr = errors.New("no readiness probe completed")
+			}
+			return fmt.Errorf("postgres did not become ready: %w", lastErr)
+		case <-retry.C:
+		}
 	}
-	return fmt.Errorf("postgres did not become ready: %w", lastErr)
+}
+
+func postgresExitedBeforeReady(err error) error {
+	if err == nil {
+		return errors.New("postgres exited before becoming ready")
+	}
+	return fmt.Errorf("postgres exited before becoming ready: %w", err)
 }
 
 // ensureDatabase creates the configured database if it does not exist (the
