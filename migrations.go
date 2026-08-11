@@ -133,17 +133,8 @@ func (s *Runtime) applyMigration(ctx context.Context) error {
 	}
 
 	s.Wool.Debug("migrations", wool.Field("sources", len(sources)))
-	// One pool for the whole function — sql.Open is lazy and the *sql.DB is
-	// reused across every source and retry, so a single defer cleans it up on
-	// EVERY return path.
-	db, err := sql.Open("postgres", s.connection)
-	if err != nil {
-		return s.Wool.Wrapf(err, "cannot open database")
-	}
-	defer db.Close()
-
 	for _, src := range sources {
-		if err := s.applySource(ctx, db, src); err != nil {
+		if err := s.applySource(ctx, src); err != nil {
 			return s.Wool.Wrapf(err, "cannot apply migrations for source %q", src.label())
 		}
 	}
@@ -154,25 +145,94 @@ func (s *Runtime) applyMigration(ctx context.Context) error {
 // using that source's dedicated tracking table. Retries the driver handshake a
 // few times (the pool may still be warming up) and self-heals a dirty state
 // left by an interrupted prior run.
-func (s *Runtime) applySource(ctx context.Context, db *sql.DB, src migrationSource) error {
+func (s *Runtime) applySource(ctx context.Context, src migrationSource) error {
 	maxRetry := 3
+	var lastErr error
 	for range maxRetry {
-		driver, err := postgres.WithInstance(db, &postgres.Config{
-			DatabaseName:    s.Settings.DatabaseName,
-			MigrationsTable: src.table, // "" → schema_migrations (default)
-		})
+		handle, err := s.openMigration(ctx, src)
 		if err != nil {
-			time.Sleep(time.Second)
+			lastErr = err
+			select {
+			case <-ctx.Done():
+				return errors.Join(lastErr, ctx.Err())
+			case <-time.After(time.Second):
+			}
 			continue
 		}
-
-		m, err := migrate.NewWithDatabaseInstance(src.fileURL(), s.Settings.DatabaseName, driver)
-		if err != nil {
-			return s.Wool.Wrapf(err, "cannot create migration")
-		}
-		return s.runUp(m, src)
+		return errors.Join(s.runUp(handle.migration, src), handle.Close())
 	}
-	return s.Wool.NewError("cannot apply migration for source %q: retries exceeded", src.label())
+	return s.Wool.Wrapf(lastErr, "cannot prepare migration for source %q after %d attempts", src.label(), maxRetry)
+}
+
+// migrationHandle owns every resource golang-migrate opens for one migration
+// lineage. The postgres driver reserves a dedicated *sql.Conn; closing only the
+// parent pool leaves that connection alive and blocks native Postgres smart
+// shutdown. Each lineage therefore receives its own pool and closes the
+// migrate source, driver connection, and pool together.
+type migrationHandle struct {
+	migration *migrate.Migrate
+	pool      *sql.DB
+}
+
+// Close releases the migration source, its dedicated database connection, and
+// the parent pool, preserving every cleanup failure for the caller.
+func (h *migrationHandle) Close() error {
+	if h == nil || h.migration == nil || h.pool == nil {
+		return errors.New("migration handle is incomplete")
+	}
+	sourceErr, databaseErr := h.migration.Close()
+	poolErr := h.pool.Close()
+	return errors.Join(
+		wrapMigrationCloseError("source", sourceErr),
+		wrapMigrationCloseError("database connection", databaseErr),
+		wrapMigrationCloseError("SQL pool", poolErr),
+	)
+}
+
+// wrapMigrationCloseError adds ownership context without manufacturing an
+// error for a successful close.
+func wrapMigrationCloseError(resource string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("close migration %s: %w", resource, err)
+}
+
+// openMigration constructs one fully-owned real golang-migrate stack. It uses
+// WithConnection rather than WithInstance so construction failures cannot hide
+// a leased sql.Conn inside the library before ownership reaches a Migrate.
+func (s *Runtime) openMigration(ctx context.Context, src migrationSource) (*migrationHandle, error) {
+	pool, err := sql.Open("postgres", s.connection)
+	if err != nil {
+		return nil, s.Wool.Wrapf(err, "cannot open database")
+	}
+	conn, err := pool.Conn(ctx)
+	if err != nil {
+		return nil, errors.Join(
+			s.Wool.Wrapf(err, "cannot reserve migration connection"),
+			wrapMigrationCloseError("SQL pool after connection failure", pool.Close()),
+		)
+	}
+	driver, err := postgres.WithConnection(ctx, conn, &postgres.Config{
+		DatabaseName:    s.Settings.DatabaseName,
+		MigrationsTable: src.table, // "" → schema_migrations (default)
+	})
+	if err != nil {
+		return nil, errors.Join(
+			s.Wool.Wrapf(err, "cannot initialize migration driver"),
+			wrapMigrationCloseError("database connection after driver failure", conn.Close()),
+			wrapMigrationCloseError("SQL pool after driver failure", pool.Close()),
+		)
+	}
+	migration, err := migrate.NewWithDatabaseInstance(src.fileURL(), s.Settings.DatabaseName, driver)
+	if err != nil {
+		return nil, errors.Join(
+			s.Wool.Wrapf(err, "cannot create migration"),
+			wrapMigrationCloseError("database driver after migration failure", driver.Close()),
+			wrapMigrationCloseError("SQL pool after migration failure", pool.Close()),
+		)
+	}
+	return &migrationHandle{migration: migration, pool: pool}, nil
 }
 
 // runUp runs m.Up with dirty-state self-healing for a single source.
@@ -209,7 +269,7 @@ func (s *Runtime) runUp(m *migrate.Migrate, src migrationSource) error {
 	return s.Wool.Wrapf(err, "can't apply migration")
 }
 
-func (s *Runtime) updateMigration(ctx context.Context, migrationFile string) error {
+func (s *Runtime) updateMigration(ctx context.Context, migrationFile string) (runErr error) {
 	defer s.Wool.Catch()
 	ctx = s.Wool.Inject(ctx)
 
@@ -240,23 +300,14 @@ func (s *Runtime) updateMigration(ctx context.Context, migrationFile string) err
 		return s.Wool.Wrapf(err, "cannot parse migration number")
 	}
 
-	db, err := sql.Open("postgres", s.connection)
+	handle, err := s.openMigration(ctx, *owner)
 	if err != nil {
-		return s.Wool.Wrapf(err, "cannot open database")
+		return err
 	}
-	defer db.Close()
-	driver, err := postgres.WithInstance(db, &postgres.Config{
-		DatabaseName:    s.Settings.DatabaseName,
-		MigrationsTable: owner.table,
-	})
-	if err != nil {
-		return s.Wool.Wrapf(err, "cannot create driver")
-	}
-
-	m, err := migrate.NewWithDatabaseInstance(owner.fileURL(), s.Settings.DatabaseName, driver)
-	if err != nil {
-		return s.Wool.Wrapf(err, "cannot create migration")
-	}
+	defer func() {
+		runErr = errors.Join(runErr, handle.Close())
+	}()
+	m := handle.migration
 
 	// Re-apply ONLY the changed migration (hot-reload during dev). Force sets
 	// the version to N (clearing any dirty flag), then we step exactly one
