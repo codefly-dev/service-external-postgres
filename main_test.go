@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	basev0 "github.com/codefly-dev/core/generated/go/codefly/base/v0"
@@ -138,6 +139,7 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 
 	_, err = runtime.Start(ctx, &runtimev0.StartRequest{})
 	require.NoError(t, err)
+	assertMigrationConnectionsAreOwned(t, ctx, runtime)
 
 	// Get the configuration and connect to postgres
 	configurationOut, err := resources.ExtractConfiguration(init.RuntimeConfigurations, resources.NewRuntimeContextNative())
@@ -306,6 +308,46 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 			serviceName,
 			fixtureID,
 		)
+	}
+}
+
+// assertMigrationConnectionsAreOwned proves the real golang-migrate boundary
+// does not retain a backend after startup or after an explicit handle close.
+// It runs inside the existing Docker/Nix lifecycle, so no fake database or
+// second infrastructure harness is needed.
+func assertMigrationConnectionsAreOwned(t *testing.T, ctx context.Context, runtime *Runtime) {
+	t.Helper()
+	probePool, err := sql.Open("postgres", runtime.connection)
+	require.NoError(t, err)
+	defer probePool.Close()
+	probe, err := probePool.Conn(ctx)
+	require.NoError(t, err)
+	defer probe.Close()
+
+	countOtherBackends := func() int {
+		var count int
+		err := probe.QueryRowContext(ctx, `
+			SELECT count(*)
+			FROM pg_stat_activity
+			WHERE datname = current_database()
+			  AND pid <> pg_backend_pid()
+		`).Scan(&count)
+		require.NoError(t, err)
+		return count
+	}
+	require.Zero(t, countOtherBackends(), "startup migrations retained database backends")
+
+	handle, err := runtime.openMigration(ctx, migrationSource{dir: runtime.Local("migrations")})
+	require.NoError(t, err)
+	require.Equal(t, 1, countOtherBackends(), "one migration handle must own exactly one backend")
+	require.NoError(t, handle.Close())
+
+	deadline := time.Now().Add(2 * time.Second)
+	for countOtherBackends() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("closed migration handle retained a database backend")
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 }
 
