@@ -150,7 +150,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	// database as the Docker path, so the rest of the agent is unchanged.
 	if rc := req.GetRuntimeContext(); rc != nil && rc.Kind == resources.RuntimeContextNix {
 		w.Debug("using nix runtime for postgres", wool.Field("port", instance.Port))
-		nixpg, errNix := newNixPostgres(ctx, s.Location, uint16(instance.Port),
+		nixpg, errNix := newNixPostgres(ctx, nixPostgresStateKey(s.Location, s.Environment.NamingScope), uint16(instance.Port),
 			s.postgresUser, s.postgresPassword, s.DatabaseName, s.LogLevel, newPGLogWriter(s.Wool))
 		if errNix != nil {
 			return s.Runtime.InitError(errNix)
