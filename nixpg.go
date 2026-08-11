@@ -75,19 +75,16 @@ type nixPostgres struct {
 // whose runtime state (data dir, nix cache, flake, unix socket) lives ENTIRELY
 // OUTSIDE the user's source tree.
 //
-// baseDir is the agent's service location, which normally sits inside the
-// workspace repo. That repo is later consumed as a nix flake `path:` input when
-// codefly builds dependent services — and a unix socket left under it aborts
-// the flake fetch ("file ... has an unsupported type"), while a churning data
-// dir busts the flake eval cache. So we root everything in a stable per-service
-// runtime dir under the user cache dir, keyed by a hash of baseDir so a restart
-// of the same service reuses the same cluster (data persists like a Docker
-// volume) without ever touching the source tree.
-func newNixPostgres(ctx context.Context, baseDir string, port uint16, user, password, dbName, logLevel string, out io.Writer) (*nixPostgres, error) {
+// stateKey is derived from the agent's service location and the authoritative
+// Codefly naming scope. The source repo is later consumed as a nix flake `path:`
+// input, so runtime state cannot live below it. The scoped key also prevents
+// independent Codefly flows from sharing credentials or database contents,
+// while an unscoped restart retains the historical per-location cluster.
+func newNixPostgres(ctx context.Context, stateKey string, port uint16, user, password, dbName, logLevel string, out io.Writer) (*nixPostgres, error) {
 	if strings.TrimSpace(password) == "" {
 		return nil, fmt.Errorf("postgres password is required for the native runtime")
 	}
-	runtimeRoot, err := nixRuntimeRoot(baseDir)
+	runtimeRoot, err := nixRuntimeRoot(stateKey)
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +107,7 @@ func newNixPostgres(ctx context.Context, baseDir string, port uint16, user, pass
 	// The unix socket path has a ~104-char limit, so it cannot live under a deep
 	// cache path. Use an unpredictable, owner-only temporary directory: a stable
 	// /tmp name can be pre-created or symlinked by another local user.
-	socketDir, err := os.MkdirTemp("", "cfpg-"+serviceHash(baseDir)[:8]+"-")
+	socketDir, err := os.MkdirTemp("", "cfpg-"+serviceHash(stateKey)[:8]+"-")
 	if err != nil {
 		return nil, fmt.Errorf("create postgres socket dir: %w", err)
 	}
@@ -132,23 +129,33 @@ func newNixPostgres(ctx context.Context, baseDir string, port uint16, user, pass
 	}, nil
 }
 
-// serviceHash is the hex sha256 of a service's base dir — a stable key that
-// maps a service location to its out-of-tree runtime dirs.
-func serviceHash(baseDir string) string {
-	sum := sha256.Sum256([]byte(baseDir))
+// nixPostgresStateKey preserves the existing unscoped data location while
+// making Codefly's advanced naming-scope isolation apply equally to the Nix
+// and Docker Postgres runtimes. The separator is unambiguous and the resulting
+// value is hashed before it is used as a filesystem component.
+func nixPostgresStateKey(serviceLocation, namingScope string) string {
+	if namingScope == "" {
+		return serviceLocation
+	}
+	return serviceLocation + "\x00naming-scope\x00" + namingScope
+}
+
+// serviceHash is the hex sha256 of a service's scoped state key.
+func serviceHash(stateKey string) string {
+	sum := sha256.Sum256([]byte(stateKey))
 	return hex.EncodeToString(sum[:])
 }
 
 // nixRuntimeRoot is the stable, out-of-source runtime root for a postgres
-// service (data dir, nix cache, flake), keyed by a hash of its agent location
-// so restarts reuse the same cluster. Falls back to the OS temp dir if no user
-// cache dir is available.
-func nixRuntimeRoot(baseDir string) (string, error) {
+// service (data dir, nix cache, flake), keyed by its scoped state identity so
+// same-scope restarts reuse the cluster without crossing isolation scopes.
+// Falls back to the OS temp dir if no user cache dir is available.
+func nixRuntimeRoot(stateKey string) (string, error) {
 	cache, err := os.UserCacheDir()
 	if err != nil {
 		cache = os.TempDir()
 	}
-	return filepath.Join(cache, "codefly", "postgres", serviceHash(baseDir)[:16]), nil
+	return filepath.Join(cache, "codefly", "postgres", serviceHash(stateKey)[:16]), nil
 }
 
 // Init materializes the nix env, initdb's the cluster on first boot, launches
