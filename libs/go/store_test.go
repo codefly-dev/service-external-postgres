@@ -84,6 +84,64 @@ func TestWriterBindsScopeAndExposesMutation(t *testing.T) {
 	}
 }
 
+func TestWriterStreamsBulkRowsOnlyIntoTemporarySchema(t *testing.T) {
+	writeBackend := &fakeBeginner{tx: &fakeTransaction{}}
+	factory := newTestFactory(t, &fakeBeginner{tx: &fakeTransaction{}}, writeBackend, fakeAuthenticator{
+		principal: testPrincipal{tenant: "tenant-b", user: "user-b"},
+	})
+
+	writer, err := factory.Writer(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := [][]any{{"one", int64(1)}, {"two", int64(2)}}
+	if err := writer.InTransaction(context.Background(), func(ctx context.Context, tx WriteTx) error {
+		copied, copyErr := tx.CopyIntoTemporaryTable(ctx, "publication_stage", []string{"id", "sequence"}, pgx.CopyFromRows(rows))
+		if copyErr != nil {
+			return copyErr
+		}
+		if copied != int64(len(rows)) {
+			t.Fatalf("copied rows = %d, want %d", copied, len(rows))
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	copy := writeBackend.tx.copies[0]
+	if got, want := copy.table.Sanitize(), `"pg_temp"."publication_stage"`; got != want {
+		t.Fatalf("copy destination = %s, want %s", got, want)
+	}
+	if !reflect.DeepEqual(copy.columns, []string{"id", "sequence"}) || !reflect.DeepEqual(copy.rows, rows) {
+		t.Fatalf("copy = %#v, want columns and rows %#v / %#v", copy, []string{"id", "sequence"}, rows)
+	}
+}
+
+func TestWriterRejectsIncompleteTemporaryCopy(t *testing.T) {
+	writeBackend := &fakeBeginner{tx: &fakeTransaction{}}
+	factory := newTestFactory(t, &fakeBeginner{tx: &fakeTransaction{}}, writeBackend, fakeAuthenticator{
+		principal: testPrincipal{tenant: "tenant-b", user: "user-b"},
+	})
+	writer, err := factory.Writer(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.InTransaction(context.Background(), func(ctx context.Context, tx WriteTx) error {
+		if _, copyErr := tx.CopyIntoTemporaryTable(ctx, "", []string{"id"}, pgx.CopyFromRows(nil)); copyErr == nil {
+			t.Fatal("temporary copy accepted an empty table")
+		}
+		if _, copyErr := tx.CopyIntoTemporaryTable(ctx, "stage", []string{""}, pgx.CopyFromRows(nil)); copyErr == nil {
+			t.Fatal("temporary copy accepted an empty column")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(writeBackend.tx.copies) != 0 {
+		t.Fatal("invalid temporary copy reached Postgres")
+	}
+}
+
 func TestRequireTenantAndUserValidateArtifactScopeWithoutDatabaseAccess(t *testing.T) {
 	readerBackend := &fakeBeginner{tx: &fakeTransaction{}}
 	writerBackend := &fakeBeginner{tx: &fakeTransaction{}}
@@ -379,8 +437,15 @@ type execution struct {
 	arguments []any
 }
 
+type copiedRows struct {
+	table   pgx.Identifier
+	columns []string
+	rows    [][]any
+}
+
 type fakeTransaction struct {
 	executions    []execution
+	copies        []copiedRows
 	execError     error
 	committed     bool
 	commitError   error
@@ -398,6 +463,22 @@ func (t *fakeTransaction) QueryRow(context.Context, string, ...any) pgx.Row {
 func (t *fakeTransaction) Exec(_ context.Context, statement string, arguments ...any) (pgconn.CommandTag, error) {
 	t.executions = append(t.executions, execution{statement: statement, arguments: arguments})
 	return pgconn.CommandTag{}, t.execError
+}
+
+func (t *fakeTransaction) CopyFrom(_ context.Context, table pgx.Identifier, columns []string, source pgx.CopyFromSource) (int64, error) {
+	copy := copiedRows{table: append(pgx.Identifier(nil), table...), columns: append([]string(nil), columns...)}
+	for source.Next() {
+		values, err := source.Values()
+		if err != nil {
+			return 0, err
+		}
+		copy.rows = append(copy.rows, append([]any(nil), values...))
+	}
+	if err := source.Err(); err != nil {
+		return 0, err
+	}
+	t.copies = append(t.copies, copy)
+	return int64(len(copy.rows)), nil
 }
 
 func (t *fakeTransaction) Commit(context.Context) error {

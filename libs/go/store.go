@@ -139,6 +139,12 @@ type ReadTx interface {
 type WriteTx interface {
 	ReadTx
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	// CopyIntoTemporaryTable streams rows into a transaction-local staging
+	// table. The destination is always resolved through pg_temp, so bulk
+	// loading cannot bypass the scoped transaction's RLS-protected durable
+	// writes. Applications create the temporary table with Exec, stream into
+	// it here, then publish with an ordinary INSERT ... SELECT.
+	CopyIntoTemporaryTable(context.Context, string, []string, pgx.CopyFromSource) (int64, error)
 	ScopedAdvisoryLock(context.Context, string, ...string) error
 }
 
@@ -358,6 +364,7 @@ type transaction interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 	QueryRow(context.Context, string, ...any) pgx.Row
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	CopyFrom(context.Context, pgx.Identifier, []string, pgx.CopyFromSource) (int64, error)
 	Commit(context.Context) error
 	Rollback(context.Context) error
 }
@@ -397,6 +404,27 @@ func (w writeTx) QueryRow(ctx context.Context, sql string, arguments ...any) pgx
 
 func (w writeTx) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
 	return w.tx.Exec(ctx, sql, arguments...)
+}
+
+// CopyIntoTemporaryTable exposes pgx's bounded streaming copy path without
+// exposing arbitrary COPY destinations. pg_temp is connection-local, and the
+// surrounding transaction remains the only route from staging data into a
+// durable, tenant-scoped relation.
+func (w writeTx) CopyIntoTemporaryTable(ctx context.Context, table string, columns []string, source pgx.CopyFromSource) (int64, error) {
+	table = strings.TrimSpace(table)
+	if ctx == nil || w.tx == nil || table == "" || len(columns) == 0 || source == nil {
+		return 0, errors.New("scoped Postgres temporary copy requires a transaction, context, table, columns, and source")
+	}
+	for _, column := range columns {
+		if strings.TrimSpace(column) == "" {
+			return 0, errors.New("scoped Postgres temporary copy columns cannot be empty")
+		}
+	}
+	rows, err := w.tx.CopyFrom(ctx, pgx.Identifier{"pg_temp", table}, columns, source)
+	if err != nil {
+		return rows, fmt.Errorf("copy into scoped Postgres temporary table %q: %w", table, err)
+	}
+	return rows, nil
 }
 
 // ScopedAdvisoryLock serializes a logical resource inside the authenticated
