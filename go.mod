@@ -2,10 +2,10 @@ module github.com/codefly-dev/service-postgres
 
 go 1.25.12
 
-toolchain go1.26.5
+toolchain go1.26.6
 
 require (
-	github.com/codefly-dev/core v0.2.107
+	github.com/codefly-dev/core v0.2.121
 	github.com/golang-migrate/migrate/v4 v4.19.1
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/lib/pq v1.12.3
