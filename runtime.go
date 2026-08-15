@@ -377,6 +377,21 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	if err := s.ensureRuntimeAccess(ctx); err != nil {
 		return s.Runtime.StartError(err)
 	}
+	// Report a mid-run death of the managed postgres process so codefly's Follow
+	// loop observes StartStatus ERROR and tears down loudly instead of leaving
+	// dependents to spin on connection refused (codefly-dev/cli#380). Docker
+	// runtimes are supervised by the container engine and reported via the
+	// runner environment; the Nix host process has no such supervisor.
+	if s.nixRuntime != nil {
+		s.nixRuntime.Supervise(func(err error) {
+			if err != nil {
+				s.Wool.Error("nix postgres exited unexpectedly", wool.ErrField(err))
+			} else {
+				s.Wool.Error("nix postgres exited unexpectedly (clean exit, not stopped)")
+			}
+			s.Runtime.MarkRunnerExited(err)
+		})
+	}
 	s.Wool.Debug("start done")
 	return s.Runtime.StartResponse()
 }

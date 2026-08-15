@@ -335,6 +335,45 @@ func (n *nixPostgres) startServer(ctx context.Context) error {
 	return nil
 }
 
+// Supervise watches the running postgres process after startup and invokes
+// onExit exactly once if the postmaster terminates for any reason OTHER than a
+// deliberate Stop. The Nix runtime is a host process the agent owns directly:
+// without this the postmaster can exit mid-run (crash, an external SIGTERM, an
+// invalidated data-directory lock) while the agent keeps reporting STARTED,
+// leaving codefly's Follow loop blind and every dependent wedged on connection
+// refused (codefly-dev/cli#380). This mirrors the user-binary supervision
+// service-go performs by feeding the exit into MarkRunnerExited.
+//
+// Call it once, after a successful Init/Start: startServer has populated
+// serverExit and serverCtx, and waitReady has finished observing serverExit, so
+// this goroutine is the sole remaining reader of the channel.
+func (n *nixPostgres) Supervise(onExit func(error)) {
+	exit := n.serverExit
+	if exit == nil {
+		return
+	}
+	// Stop cancels serverCtx before terminating the process, so a cancelled
+	// context is the authoritative "this shutdown was orderly" signal.
+	var stopped <-chan struct{}
+	if n.serverCtx != nil {
+		stopped = n.serverCtx.Done()
+	}
+	go func() {
+		err, ok := <-exit
+		if !ok {
+			return
+		}
+		if stopped != nil {
+			select {
+			case <-stopped:
+				return
+			default:
+			}
+		}
+		onExit(err)
+	}()
+}
+
 // adminDSN reaches this runtime's private Unix socket. Bootstrap work must not
 // use the public TCP mapping: another backend or stale process can still own
 // that port, and accepting its successful ping would authenticate, migrate,
