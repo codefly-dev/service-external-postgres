@@ -15,9 +15,27 @@ import (
 	"github.com/lib/pq"
 )
 
+// AuthMode selects how the login principals for the runtime roles are managed.
+type AuthMode string
+
+const (
+	// AuthModePassword is the default. The service runtime owns login-role
+	// creation and password rotation; this reconciler only grants privileges to
+	// the already-existing _ro/_rw login roles. Local nix/docker development.
+	AuthModePassword AuthMode = "password"
+	// AuthModeExternalIdentity is for managed cloud Postgres with password auth
+	// off. The login principals are created out-of-band by the cloud identity
+	// provider (Entra ID / Cloud SQL IAM); this reconciler creates only the
+	// _ro/_rw NOLOGIN group roles, grants them the same privileges, and
+	// reconciles the external principals into them. No password is ever set.
+	AuthModeExternalIdentity AuthMode = "external-identity"
+)
+
 // RuntimeAccess describes the least-privilege application roles for one
-// database. Roles must already exist; login-role creation and password rotation
-// remain service-runtime responsibilities.
+// database. In password mode the _ro/_rw login roles must already exist;
+// login-role creation and password rotation remain service-runtime
+// responsibilities. In external-identity mode this reconciler creates the
+// _ro/_rw NOLOGIN group roles itself.
 type RuntimeAccess struct {
 	Database       string
 	OwnerRole      string
@@ -29,6 +47,14 @@ type RuntimeAccess struct {
 	// reconciliation. The service runtime enables it; isolated database drills
 	// leave it disabled because memberships are not database-local.
 	ReconcileReadWriteRoleMemberships bool
+	// AuthMode selects login-principal management. Empty is AuthModePassword.
+	AuthMode AuthMode
+	// ReadOnlyPrincipals and ReadWritePrincipals are the externally-created
+	// login principals reconciled into exactly the read-only / read-write group
+	// role. Consulted only in AuthModeExternalIdentity; this reconciler never
+	// creates them.
+	ReadOnlyPrincipals  []string
+	ReadWritePrincipals []string
 }
 
 // ReconcileRuntimeAccess grants only CONNECT/USAGE/query capabilities, revokes
@@ -36,6 +62,11 @@ type RuntimeAccess struct {
 // principal receives direct DML only when no delegated roles are configured;
 // otherwise its exclusive write authority is the reconciled NOLOGIN role set.
 // The caller owns the transaction and must roll it back on any returned error.
+//
+// Membership reconciliation revokes then re-grants, so the caller must also
+// serialize concurrent reconciliations of the same database: the service
+// runtime holds a per-database advisory lock for the transaction's duration,
+// and external-identity callers must do the same.
 func ReconcileRuntimeAccess(ctx context.Context, tx *sql.Tx, access RuntimeAccess) error {
 	if ctx == nil {
 		return errors.New("runtime-access context is required")
@@ -50,6 +81,15 @@ func ReconcileRuntimeAccess(ctx context.Context, tx *sql.Tx, access RuntimeAcces
 	owner := pq.QuoteIdentifier(access.OwnerRole)
 	readOnly := pq.QuoteIdentifier(access.ReadOnlyRole)
 	readWrite := pq.QuoteIdentifier(access.ReadWriteRole)
+
+	if access.AuthMode == AuthModeExternalIdentity {
+		if err := ensureGroupRole(ctx, tx, access.ReadOnlyRole); err != nil {
+			return err
+		}
+		if err := ensureGroupRole(ctx, tx, access.ReadWriteRole); err != nil {
+			return err
+		}
+	}
 
 	databaseStatements := []string{
 		`REVOKE ALL PRIVILEGES ON DATABASE ` + database + ` FROM ` + readOnly,
@@ -96,10 +136,18 @@ func ReconcileRuntimeAccess(ctx context.Context, tx *sql.Tx, access RuntimeAcces
 			}
 		}
 	}
-	if !access.ReconcileReadWriteRoleMemberships {
-		return nil
+	if access.ReconcileReadWriteRoleMemberships {
+		if err := reconcileRuntimeRoleMemberships(ctx, tx, access.ReadWriteRole, access.ReadWriteRoles); err != nil {
+			return err
+		}
 	}
-	return reconcileRuntimeRoleMemberships(ctx, tx, access.ReadWriteRole, access.ReadWriteRoles)
+	if access.AuthMode == AuthModeExternalIdentity {
+		if err := reconcileExternalPrincipals(ctx, tx, access.ReadOnlyRole, access.ReadOnlyPrincipals); err != nil {
+			return err
+		}
+		return reconcileExternalPrincipals(ctx, tx, access.ReadWriteRole, access.ReadWritePrincipals)
+	}
+	return nil
 }
 
 func validateRuntimeAccess(access RuntimeAccess) error {
@@ -126,6 +174,108 @@ func validateRuntimeAccess(access RuntimeAccess) error {
 		if strings.TrimSpace(schema) == "" {
 			return errors.New("runtime-access schema cannot be empty")
 		}
+	}
+	switch access.AuthMode {
+	case "", AuthModePassword:
+		if len(access.ReadOnlyPrincipals) > 0 || len(access.ReadWritePrincipals) > 0 {
+			return errors.New("runtime-access external principals require external-identity auth mode")
+		}
+	case AuthModeExternalIdentity:
+		for _, principals := range [][]string{access.ReadOnlyPrincipals, access.ReadWritePrincipals} {
+			for _, principal := range principals {
+				if strings.TrimSpace(principal) == "" {
+					return errors.New("runtime-access external principal cannot be empty")
+				}
+			}
+		}
+	default:
+		return fmt.Errorf("runtime-access auth mode %q is not supported", access.AuthMode)
+	}
+	return nil
+}
+
+// ensureGroupRole creates role as a NOLOGIN group role if absent and enforces
+// the guard attributes on it. It never sets a password: external-identity mode
+// leaves login-principal authentication to the cloud identity provider.
+func ensureGroupRole(ctx context.Context, tx *sql.Tx, role string) error {
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)`, role).Scan(&exists); err != nil {
+		return err
+	}
+	quotedRole := pq.QuoteIdentifier(role)
+	if !exists {
+		if _, err := tx.ExecContext(ctx, `CREATE ROLE `+quotedRole); err != nil {
+			return err
+		}
+	}
+	_, err := tx.ExecContext(ctx, `ALTER ROLE `+quotedRole+` WITH NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS`)
+	return err
+}
+
+// reconcileExternalPrincipals makes the group role's members exactly the
+// configured external principals: members no longer configured are revoked, and
+// newly configured principals are granted. It reconciles the group's membership
+// only — a principal's memberships outside this group are the cloud identity
+// provider's concern and are left untouched. The provider owns the principals,
+// so a configured principal that does not exist fails loud rather than being
+// created (mirroring the delegated read-write role existence check).
+func reconcileExternalPrincipals(ctx context.Context, tx *sql.Tx, group string, principals []string) error {
+	desired := make(map[string]struct{}, len(principals))
+	for _, principal := range principals {
+		desired[principal] = struct{}{}
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT member.rolname
+		FROM pg_auth_members membership
+		JOIN pg_roles granted ON granted.oid = membership.roleid
+		JOIN pg_roles member ON member.oid = membership.member
+		WHERE granted.rolname = $1`, group)
+	if err != nil {
+		return err
+	}
+	current := make(map[string]struct{})
+	for rows.Next() {
+		var member string
+		if err := rows.Scan(&member); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		current[member] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	quotedGroup := pq.QuoteIdentifier(group)
+	for member := range current {
+		if _, keep := desired[member]; keep {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `REVOKE `+quotedGroup+` FROM `+pq.QuoteIdentifier(member)); err != nil {
+			return err
+		}
+	}
+
+	for _, principal := range principals {
+		if _, member := current[principal]; member {
+			continue
+		}
+		var exists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)`, principal).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("external identity principal %q does not exist; create it out-of-band", principal)
+		}
+		if _, err := tx.ExecContext(ctx, `GRANT `+quotedGroup+` TO `+pq.QuoteIdentifier(principal)); err != nil {
+			return err
+		}
+		current[principal] = struct{}{}
 	}
 	return nil
 }

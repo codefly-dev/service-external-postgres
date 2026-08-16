@@ -149,9 +149,10 @@ type WriteTx interface {
 }
 
 type config struct {
-	tenantSetting    string
-	userSetting      string
-	operationTimeout time.Duration
+	tenantSetting       string
+	userSetting         string
+	operationTimeout    time.Duration
+	accessTokenProvider AccessTokenProvider
 }
 
 // Option configures the RLS settings used by application policies.

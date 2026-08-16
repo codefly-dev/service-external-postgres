@@ -37,3 +37,35 @@ func TestReconcileRuntimeAccessFailsClosedBeforeSQL(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateRuntimeAccessAuthMode(t *testing.T) {
+	base := RuntimeAccess{
+		Database: "application", OwnerRole: "owner", ReadOnlyRole: "reader", ReadWriteRole: "writer", Schemas: []string{"public"},
+	}
+	for name, mutate := range map[string]func(*RuntimeAccess){
+		"unknown mode": func(access *RuntimeAccess) { access.AuthMode = "kerberos" },
+		"principals without external mode": func(access *RuntimeAccess) {
+			access.ReadOnlyPrincipals = []string{"cloud_reader"}
+		},
+		"empty external principal": func(access *RuntimeAccess) {
+			access.AuthMode = AuthModeExternalIdentity
+			access.ReadWritePrincipals = []string{"  "}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := base
+			mutate(&candidate)
+			if err := validateRuntimeAccess(candidate); err == nil {
+				t.Fatal("invalid auth-mode contract was accepted")
+			}
+		})
+	}
+
+	valid := base
+	valid.AuthMode = AuthModeExternalIdentity
+	valid.ReadOnlyPrincipals = []string{"cloud_reader"}
+	valid.ReadWritePrincipals = []string{"cloud_writer"}
+	if err := validateRuntimeAccess(valid); err != nil {
+		t.Fatalf("valid external-identity contract rejected: %v", err)
+	}
+}

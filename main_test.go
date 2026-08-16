@@ -14,9 +14,11 @@ import (
 	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/wool"
 	scoped "github.com/codefly-dev/service-postgres/libs/go"
+	pgcontrol "github.com/codefly-dev/service-postgres/libs/go/controlplane"
 	migrationtest "github.com/codefly-dev/service-postgres/libs/go/migrationtest"
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
+	"net/url"
 	"os"
 	"path"
 	"testing"
@@ -296,6 +298,9 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 		"delegated writer must mutate through an explicitly configured role",
 	)
 
+	assertExternalIdentityReconciliation(t, ctx, migrationControl)
+	assertExternalIdentityTokenAuthentication(t, ctx, readOnlyConnection, readWriteConnection)
+
 	if runtimeContext.Kind == resources.RuntimeContextContainer {
 		assertDockerStateSurvivesContainerRecreation(
 			t,
@@ -409,4 +414,196 @@ func assertDockerStateSurvivesContainerRecreation(
 	found, err := reader.HasFixture(ctx, relation, fixtureID)
 	require.NoError(t, err)
 	require.True(t, found, "data written before container recreation must remain available")
+}
+
+// assertExternalIdentityReconciliation drives the runtime role reconciler in
+// external-identity mode against an isolated real database: the login
+// principals are created out-of-band, codefly creates only the _ro/_rw NOLOGIN
+// group roles, and reconciles the principals into exactly their group role
+// without ever issuing a password.
+func assertExternalIdentityReconciliation(t *testing.T, ctx context.Context, control *migrationtest.ControlPlane) {
+	t.Helper()
+	isolate, err := control.Create(ctx, "service_postgres_external_identity")
+	require.NoError(t, err)
+	defer isolate.Drop(context.Background())
+
+	readOnlyGroup, readWriteGroup := runtimeRoleNames(isolate.Name)
+	readerPrincipal := readOnlyGroup + "_p"
+	writerPrincipal := readWriteGroup + "_p"
+
+	base := pgcontrol.RuntimeAccess{
+		Database:                          isolate.Name,
+		OwnerRole:                         "postgres",
+		ReadOnlyRole:                      readOnlyGroup,
+		ReadWriteRole:                     readWriteGroup,
+		Schemas:                           []string{"public"},
+		AuthMode:                          pgcontrol.AuthModeExternalIdentity,
+		ReconcileReadWriteRoleMemberships: true,
+	}
+	reconcile := func(access pgcontrol.RuntimeAccess) error {
+		tx, err := isolate.DB.BeginTx(ctx, nil)
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback() }()
+		if err := pgcontrol.ReconcileRuntimeAccess(ctx, tx, access); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+
+	// An external principal that the cloud has not created fails loud.
+	missing := base
+	missing.ReadWritePrincipals = []string{writerPrincipal}
+	require.ErrorContains(t, reconcile(missing), "does not exist")
+
+	for _, principal := range []string{readerPrincipal, writerPrincipal} {
+		_, err = isolate.DB.ExecContext(ctx, "CREATE ROLE "+pq.QuoteIdentifier(principal)+" LOGIN")
+		require.NoError(t, err)
+	}
+	_, err = isolate.DB.ExecContext(ctx, "CREATE TABLE ext_fixture (id integer)")
+	require.NoError(t, err)
+
+	full := base
+	full.ReadOnlyPrincipals = []string{readerPrincipal}
+	full.ReadWritePrincipals = []string{writerPrincipal}
+	require.NoError(t, reconcile(full))
+
+	// The managed group roles are NOLOGIN and never received a password.
+	for _, group := range []string{readOnlyGroup, readWriteGroup} {
+		var canLogin, hasPassword bool
+		require.NoError(t, isolate.DB.QueryRowContext(ctx,
+			"SELECT rolcanlogin, rolpassword IS NOT NULL FROM pg_authid WHERE rolname = $1", group,
+		).Scan(&canLogin, &hasPassword))
+		require.Falsef(t, canLogin, "managed group role %q must be NOLOGIN in external-identity mode", group)
+		require.Falsef(t, hasPassword, "managed group role %q must not carry a password", group)
+	}
+
+	require.ElementsMatch(t, []string{readOnlyGroup}, principalGroupMemberships(t, ctx, isolate.DB, readerPrincipal))
+	require.ElementsMatch(t, []string{readWriteGroup}, principalGroupMemberships(t, ctx, isolate.DB, writerPrincipal))
+
+	// The group membership confers effective privilege by inheritance: the
+	// writer principal can write, the reader principal can read but not write.
+	assertPrincipalInsert := func(principal string, wantOK bool) {
+		conn, err := isolate.DB.Conn(ctx)
+		require.NoError(t, err)
+		defer conn.Close()
+		_, err = conn.ExecContext(ctx, "SET ROLE "+pq.QuoteIdentifier(principal))
+		require.NoError(t, err)
+		_, insertErr := conn.ExecContext(ctx, "INSERT INTO ext_fixture (id) VALUES (1)")
+		_, _ = conn.ExecContext(ctx, "RESET ROLE")
+		if wantOK {
+			require.NoError(t, insertErr, "writer principal must inherit write access via its group role")
+		} else {
+			require.Error(t, insertErr, "reader principal must not inherit write access")
+		}
+	}
+	assertPrincipalInsert(writerPrincipal, true)
+	assertPrincipalInsert(readerPrincipal, false)
+	readerConn, err := isolate.DB.Conn(ctx)
+	require.NoError(t, err)
+	defer readerConn.Close()
+	_, err = readerConn.ExecContext(ctx, "SET ROLE "+pq.QuoteIdentifier(readerPrincipal))
+	require.NoError(t, err)
+	var readable int
+	require.NoError(t, readerConn.QueryRowContext(ctx, "SELECT count(*) FROM ext_fixture").Scan(&readable),
+		"reader principal must inherit read access via its group role")
+	_, _ = readerConn.ExecContext(ctx, "RESET ROLE")
+
+	// A membership the principal holds outside the managed group is not touched:
+	// the reconciler owns the group's membership, not the cloud principal's.
+	strayRole := readWriteGroup + "_stray"
+	_, err = isolate.DB.ExecContext(ctx, "CREATE ROLE "+pq.QuoteIdentifier(strayRole)+" NOLOGIN")
+	require.NoError(t, err)
+	_, err = isolate.DB.ExecContext(ctx, "GRANT "+pq.QuoteIdentifier(strayRole)+" TO "+pq.QuoteIdentifier(writerPrincipal))
+	require.NoError(t, err)
+	require.NoError(t, reconcile(full))
+	require.ElementsMatch(t, []string{readWriteGroup, strayRole}, principalGroupMemberships(t, ctx, isolate.DB, writerPrincipal))
+
+	// A principal dropped from the configured set is revoked from the group,
+	// idempotently, without disturbing the principals still configured.
+	retiredPrincipal := readWriteGroup + "_retired"
+	_, err = isolate.DB.ExecContext(ctx, "CREATE ROLE "+pq.QuoteIdentifier(retiredPrincipal)+" LOGIN")
+	require.NoError(t, err)
+	withRetired := full
+	withRetired.ReadWritePrincipals = []string{writerPrincipal, retiredPrincipal}
+	require.NoError(t, reconcile(withRetired))
+	require.ElementsMatch(t, []string{readWriteGroup}, principalGroupMemberships(t, ctx, isolate.DB, retiredPrincipal))
+	require.NoError(t, reconcile(full))
+	require.Empty(t, principalGroupMemberships(t, ctx, isolate.DB, retiredPrincipal))
+	require.NoError(t, reconcile(full))
+	require.Empty(t, principalGroupMemberships(t, ctx, isolate.DB, retiredPrincipal))
+	require.ElementsMatch(t, []string{readWriteGroup, strayRole}, principalGroupMemberships(t, ctx, isolate.DB, writerPrincipal))
+}
+
+// assertExternalIdentityTokenAuthentication proves the passwordless DSN + token
+// contract end to end through the real consumer entrypoint: the reader/writer
+// login roles authenticate with a per-principal token supplied via
+// WithAccessTokenProvider (pgx BeforeConnect), with no password in the DSN.
+func assertExternalIdentityTokenAuthentication(t *testing.T, ctx context.Context, readOnlyConnection, readWriteConnection string) {
+	t.Helper()
+	readerUser, readerPassword, readerPasswordless := splitConnectionPassword(t, readOnlyConnection)
+	writerUser, writerPassword, writerPasswordless := splitConnectionPassword(t, readWriteConnection)
+	require.NotContains(t, readerPasswordless, readerPassword, "passwordless DSN still carried the reader password")
+	require.NotContains(t, writerPasswordless, writerPassword, "passwordless DSN still carried the writer password")
+
+	tokens := map[string]string{readerUser: readerPassword, writerUser: writerPassword}
+	provider := func(_ context.Context, principal string) (string, error) {
+		token, ok := tokens[principal]
+		if !ok {
+			return "", fmt.Errorf("no token minted for principal %q", principal)
+		}
+		return token, nil
+	}
+	_, closeFactory, err := scoped.Open(
+		ctx,
+		readerPasswordless,
+		writerPasswordless,
+		contextAuthenticator{},
+		scoped.WithAccessTokenProvider(provider),
+	)
+	require.NoError(t, err, "passwordless reader/writer DSNs must authenticate with per-principal tokens")
+	closeFactory()
+
+	// A provider that cannot mint a token fails the connection loudly instead of
+	// falling back to an unauthenticated or password path.
+	_, _, err = scoped.Open(
+		ctx,
+		readerPasswordless,
+		writerPasswordless,
+		contextAuthenticator{},
+		scoped.WithAccessTokenProvider(func(context.Context, string) (string, error) {
+			return "", fmt.Errorf("token unavailable")
+		}),
+	)
+	require.Error(t, err, "a failed token acquisition must abort connection")
+}
+
+func splitConnectionPassword(t *testing.T, connection string) (user, password, passwordless string) {
+	t.Helper()
+	parsed, err := url.Parse(connection)
+	require.NoError(t, err)
+	user = parsed.User.Username()
+	password, _ = parsed.User.Password()
+	require.NotEmpty(t, password, "test fixture connection must carry a password to strip")
+	parsed.User = url.User(user)
+	return user, password, parsed.String()
+}
+
+func principalGroupMemberships(t *testing.T, ctx context.Context, db *sql.DB, principal string) []string {
+	t.Helper()
+	rows, err := db.QueryContext(ctx, `
+		SELECT granted.rolname
+		FROM pg_auth_members membership
+		JOIN pg_roles granted ON granted.oid = membership.roleid
+		JOIN pg_roles member ON member.oid = membership.member
+		WHERE member.rolname = $1`, principal)
+	require.NoError(t, err)
+	defer rows.Close()
+	var memberships []string
+	for rows.Next() {
+		var role string
+		require.NoError(t, rows.Scan(&role))
+		memberships = append(memberships, role)
+	}
+	require.NoError(t, rows.Err())
+	return memberships
 }
