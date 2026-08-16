@@ -377,6 +377,19 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 	if err := s.ensureRuntimeAccess(ctx); err != nil {
 		return s.Runtime.StartError(err)
 	}
+	s.Wool.Debug("start done")
+	// Commit StartStatus=STARTED BEFORE arming supervision. StartResponse and
+	// MarkRunnerExited both write StartStatus under the same lock, so ordering is
+	// by wall-clock, not data race: if Supervise were armed first, a postmaster
+	// death already buffered in serverExit (a crash in the Init->Start window)
+	// would let the watcher goroutine flip StartStatus to ERROR, and this
+	// StartResponse would then clobber it back to STARTED — masking the very
+	// death we exist to report (codefly-dev/cli#380). Arming after the commit
+	// guarantees any ERROR the watcher writes lands strictly after STARTED.
+	resp, err := s.Runtime.StartResponse()
+	if err != nil {
+		return resp, err
+	}
 	// Report a mid-run death of the managed postgres process so codefly's Follow
 	// loop observes StartStatus ERROR and tears down loudly instead of leaving
 	// dependents to spin on connection refused (codefly-dev/cli#380). Docker
@@ -392,8 +405,7 @@ func (s *Runtime) Start(ctx context.Context, req *runtimev0.StartRequest) (*runt
 			s.Runtime.MarkRunnerExited(err)
 		})
 	}
-	s.Wool.Debug("start done")
-	return s.Runtime.StartResponse()
+	return resp, nil
 }
 
 func (s *Runtime) Information(ctx context.Context, req *runtimev0.InformationRequest) (*runtimev0.InformationResponse, error) {

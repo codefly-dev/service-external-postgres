@@ -5,6 +5,9 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/codefly-dev/core/agents/services"
+	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
 )
 
 // awaitCallback returns the error Supervise reported, or (nil,false) if nothing
@@ -88,4 +91,91 @@ func TestSuperviseNilChannelIsNoop(t *testing.T) {
 	n := &nixPostgres{}
 	n.Supervise(func(error) { t.Fatal("callback fired with no server to watch") })
 	time.Sleep(50 * time.Millisecond)
+}
+
+// startStatusState reads the observable StartStatus the same way the
+// Information RPC does — through the RuntimeWrapper's lock.
+func startStatusState(rt *services.RuntimeWrapper) runtimev0.StartStatus_Status {
+	rt.RLock()
+	defer rt.RUnlock()
+	if rt.StartStatus == nil {
+		return runtimev0.StartStatus_UNKNOWN
+	}
+	return rt.StartStatus.State
+}
+
+// TestStartTailReportsDeathBufferedBeforeStartResponse pins the ordering fix in
+// (*Runtime).Start: the death-reporting supervisor must be armed only AFTER
+// StartResponse commits StartStatus=STARTED.
+//
+// The failure this guards against: the postmaster dies in the window between
+// waitReady succeeding (inside Init) and Start returning, so its exit is already
+// buffered in serverExit by the time Start runs. If Supervise is armed before
+// StartResponse (the original bug), the watcher goroutine flips StartStatus to
+// ERROR and StartResponse then clobbers it back to STARTED — the death is masked
+// and codefly's Follow loop never tears down (codefly-dev/cli#380).
+//
+// The two sub-cases run the same two operations in the two possible orders and
+// assert the observable final state, so the masking mechanism — and why the
+// production order is respond-then-arm — is locked in.
+func TestStartTailReportsDeathBufferedBeforeStartResponse(t *testing.T) {
+	crash := errors.New("postgres: terminated by signal 9")
+
+	// newDeadServer builds a nixPostgres whose postmaster has already exited:
+	// the exit sits in the buffered channel exactly as it would after a crash in
+	// the Init->Start window.
+	newDeadServer := func() *nixPostgres {
+		exit := make(chan error, 1)
+		exit <- crash
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		return &nixPostgres{serverExit: exit, serverCtx: ctx}
+	}
+
+	arm := func(rt *services.RuntimeWrapper, n *nixPostgres) <-chan struct{} {
+		done := make(chan struct{})
+		n.Supervise(func(err error) {
+			rt.MarkRunnerExited(err)
+			close(done)
+		})
+		return done
+	}
+
+	t.Run("respond then arm (production order) reports ERROR", func(t *testing.T) {
+		rt := &services.RuntimeWrapper{}
+		n := newDeadServer()
+
+		if _, err := rt.StartResponse(); err != nil {
+			t.Fatalf("StartResponse: %v", err)
+		}
+		done := arm(rt, n)
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("supervisor never reported the buffered death")
+		}
+		if got := startStatusState(rt); got != runtimev0.StartStatus_ERROR {
+			t.Fatalf("final StartStatus = %v, want ERROR (buffered death must not be masked)", got)
+		}
+	})
+
+	t.Run("arm then respond (original bug) masks the death as STARTED", func(t *testing.T) {
+		rt := &services.RuntimeWrapper{}
+		n := newDeadServer()
+
+		done := arm(rt, n)
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("supervisor never reported the buffered death")
+		}
+		// StartResponse running after the watcher has reported ERROR overwrites
+		// it with STARTED. This is the masking the production order avoids.
+		if _, err := rt.StartResponse(); err != nil {
+			t.Fatalf("StartResponse: %v", err)
+		}
+		if got := startStatusState(rt); got != runtimev0.StartStatus_STARTED {
+			t.Fatalf("final StartStatus = %v, want STARTED (demonstrates the masking)", got)
+		}
+	})
 }
