@@ -18,6 +18,7 @@ import (
 	migrationtest "github.com/codefly-dev/service-postgres/libs/go/migrationtest"
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
+	"net/url"
 	"os"
 	"path"
 	"testing"
@@ -298,6 +299,7 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 	)
 
 	assertExternalIdentityReconciliation(t, ctx, migrationControl)
+	assertExternalIdentityTokenAuthentication(t, ctx, readOnlyConnection, readWriteConnection)
 
 	if runtimeContext.Kind == resources.RuntimeContextContainer {
 		assertDockerStateSurvivesContainerRecreation(
@@ -530,6 +532,60 @@ func assertExternalIdentityReconciliation(t *testing.T, ctx context.Context, con
 	require.NoError(t, reconcile(full))
 	require.Empty(t, principalGroupMemberships(t, ctx, isolate.DB, retiredPrincipal))
 	require.ElementsMatch(t, []string{readWriteGroup, strayRole}, principalGroupMemberships(t, ctx, isolate.DB, writerPrincipal))
+}
+
+// assertExternalIdentityTokenAuthentication proves the passwordless DSN + token
+// contract end to end through the real consumer entrypoint: the reader/writer
+// login roles authenticate with a per-principal token supplied via
+// WithAccessTokenProvider (pgx BeforeConnect), with no password in the DSN.
+func assertExternalIdentityTokenAuthentication(t *testing.T, ctx context.Context, readOnlyConnection, readWriteConnection string) {
+	t.Helper()
+	readerUser, readerPassword, readerPasswordless := splitConnectionPassword(t, readOnlyConnection)
+	writerUser, writerPassword, writerPasswordless := splitConnectionPassword(t, readWriteConnection)
+	require.NotContains(t, readerPasswordless, readerPassword, "passwordless DSN still carried the reader password")
+	require.NotContains(t, writerPasswordless, writerPassword, "passwordless DSN still carried the writer password")
+
+	tokens := map[string]string{readerUser: readerPassword, writerUser: writerPassword}
+	provider := func(_ context.Context, principal string) (string, error) {
+		token, ok := tokens[principal]
+		if !ok {
+			return "", fmt.Errorf("no token minted for principal %q", principal)
+		}
+		return token, nil
+	}
+	_, closeFactory, err := scoped.Open(
+		ctx,
+		readerPasswordless,
+		writerPasswordless,
+		contextAuthenticator{},
+		scoped.WithAccessTokenProvider(provider),
+	)
+	require.NoError(t, err, "passwordless reader/writer DSNs must authenticate with per-principal tokens")
+	closeFactory()
+
+	// A provider that cannot mint a token fails the connection loudly instead of
+	// falling back to an unauthenticated or password path.
+	_, _, err = scoped.Open(
+		ctx,
+		readerPasswordless,
+		writerPasswordless,
+		contextAuthenticator{},
+		scoped.WithAccessTokenProvider(func(context.Context, string) (string, error) {
+			return "", fmt.Errorf("token unavailable")
+		}),
+	)
+	require.Error(t, err, "a failed token acquisition must abort connection")
+}
+
+func splitConnectionPassword(t *testing.T, connection string) (user, password, passwordless string) {
+	t.Helper()
+	parsed, err := url.Parse(connection)
+	require.NoError(t, err)
+	user = parsed.User.Username()
+	password, _ = parsed.User.Password()
+	require.NotEmpty(t, password, "test fixture connection must carry a password to strip")
+	parsed.User = url.User(user)
+	return user, password, parsed.String()
 }
 
 func principalGroupMemberships(t *testing.T, ctx context.Context, db *sql.DB, principal string) []string {
