@@ -14,6 +14,7 @@ import (
 	"github.com/codefly-dev/core/shared"
 	"github.com/codefly-dev/core/wool"
 	scoped "github.com/codefly-dev/service-postgres/libs/go"
+	pgcontrol "github.com/codefly-dev/service-postgres/libs/go/controlplane"
 	migrationtest "github.com/codefly-dev/service-postgres/libs/go/migrationtest"
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
@@ -296,6 +297,8 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 		"delegated writer must mutate through an explicitly configured role",
 	)
 
+	assertExternalIdentityReconciliation(t, ctx, migrationControl)
+
 	if runtimeContext.Kind == resources.RuntimeContextContainer {
 		assertDockerStateSurvivesContainerRecreation(
 			t,
@@ -409,4 +412,99 @@ func assertDockerStateSurvivesContainerRecreation(
 	found, err := reader.HasFixture(ctx, relation, fixtureID)
 	require.NoError(t, err)
 	require.True(t, found, "data written before container recreation must remain available")
+}
+
+// assertExternalIdentityReconciliation drives the runtime role reconciler in
+// external-identity mode against an isolated real database: the login
+// principals are created out-of-band, codefly creates only the _ro/_rw NOLOGIN
+// group roles, and reconciles the principals into exactly their group role
+// without ever issuing a password.
+func assertExternalIdentityReconciliation(t *testing.T, ctx context.Context, control *migrationtest.ControlPlane) {
+	t.Helper()
+	isolate, err := control.Create(ctx, "service_postgres_external_identity")
+	require.NoError(t, err)
+	defer isolate.Drop(context.Background())
+
+	readOnlyGroup, readWriteGroup := runtimeRoleNames(isolate.Name)
+	readerPrincipal := readOnlyGroup + "_p"
+	writerPrincipal := readWriteGroup + "_p"
+
+	base := pgcontrol.RuntimeAccess{
+		Database:                          isolate.Name,
+		OwnerRole:                         "postgres",
+		ReadOnlyRole:                      readOnlyGroup,
+		ReadWriteRole:                     readWriteGroup,
+		Schemas:                           []string{"public"},
+		AuthMode:                          pgcontrol.AuthModeExternalIdentity,
+		ReconcileReadWriteRoleMemberships: true,
+	}
+	reconcile := func(access pgcontrol.RuntimeAccess) error {
+		tx, err := isolate.DB.BeginTx(ctx, nil)
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback() }()
+		if err := pgcontrol.ReconcileRuntimeAccess(ctx, tx, access); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+
+	// An external principal that the cloud has not created fails loud.
+	missing := base
+	missing.ReadWritePrincipals = []string{writerPrincipal}
+	require.ErrorContains(t, reconcile(missing), "does not exist")
+
+	for _, principal := range []string{readerPrincipal, writerPrincipal} {
+		_, err = isolate.DB.ExecContext(ctx, "CREATE ROLE "+pq.QuoteIdentifier(principal)+" LOGIN")
+		require.NoError(t, err)
+	}
+
+	full := base
+	full.ReadOnlyPrincipals = []string{readerPrincipal}
+	full.ReadWritePrincipals = []string{writerPrincipal}
+	require.NoError(t, reconcile(full))
+
+	// The managed group roles are NOLOGIN and never received a password.
+	for _, group := range []string{readOnlyGroup, readWriteGroup} {
+		var canLogin, hasPassword bool
+		require.NoError(t, isolate.DB.QueryRowContext(ctx,
+			"SELECT rolcanlogin, rolpassword IS NOT NULL FROM pg_authid WHERE rolname = $1", group,
+		).Scan(&canLogin, &hasPassword))
+		require.Falsef(t, canLogin, "managed group role %q must be NOLOGIN in external-identity mode", group)
+		require.Falsef(t, hasPassword, "managed group role %q must not carry a password", group)
+	}
+
+	require.ElementsMatch(t, []string{readOnlyGroup}, principalGroupMemberships(t, ctx, isolate.DB, readerPrincipal))
+	require.ElementsMatch(t, []string{readWriteGroup}, principalGroupMemberships(t, ctx, isolate.DB, writerPrincipal))
+
+	// A stray membership on an external principal is revoked, converging on
+	// exactly the group-role membership; re-running is idempotent.
+	strayRole := readWriteGroup + "_stray"
+	_, err = isolate.DB.ExecContext(ctx, "CREATE ROLE "+pq.QuoteIdentifier(strayRole)+" NOLOGIN")
+	require.NoError(t, err)
+	_, err = isolate.DB.ExecContext(ctx, "GRANT "+pq.QuoteIdentifier(strayRole)+" TO "+pq.QuoteIdentifier(writerPrincipal))
+	require.NoError(t, err)
+	require.NoError(t, reconcile(full))
+	require.ElementsMatch(t, []string{readWriteGroup}, principalGroupMemberships(t, ctx, isolate.DB, writerPrincipal))
+	require.NoError(t, reconcile(full))
+	require.ElementsMatch(t, []string{readWriteGroup}, principalGroupMemberships(t, ctx, isolate.DB, writerPrincipal))
+}
+
+func principalGroupMemberships(t *testing.T, ctx context.Context, db *sql.DB, principal string) []string {
+	t.Helper()
+	rows, err := db.QueryContext(ctx, `
+		SELECT granted.rolname
+		FROM pg_auth_members membership
+		JOIN pg_roles granted ON granted.oid = membership.roleid
+		JOIN pg_roles member ON member.oid = membership.member
+		WHERE member.rolname = $1`, principal)
+	require.NoError(t, err)
+	defer rows.Close()
+	var memberships []string
+	for rows.Next() {
+		var role string
+		require.NoError(t, rows.Scan(&role))
+		memberships = append(memberships, role)
+	}
+	require.NoError(t, rows.Err())
+	return memberships
 }
