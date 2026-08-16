@@ -443,6 +443,21 @@ func TestPromotableExternalIdentityDeploymentPromotesNoCredentialSecrets(t *test
 	require.Empty(t, strings.TrimSpace(readDeploymentFile(t, destination, "overlays", "test", "secret.yaml")))
 }
 
+func TestPromotableDeploymentRejectsUnsupportedAuthMode(t *testing.T) {
+	builder, networkMappings := newDeploymentTestBuilder(t)
+	builder.AuthMode = "external-idenity" // typo
+
+	response, err := builder.Deploy(context.Background(), promotableDeploymentRequest(
+		t.TempDir(),
+		networkMappings,
+		promotablePostgresSecretReferences(),
+	))
+	require.NoError(t, err)
+	require.Equal(t, builderv0.DeploymentStatus_ERROR, response.GetState().GetState())
+	require.Contains(t, response.GetState().GetMessage(), `unsupported postgres auth mode "external-idenity"`)
+	require.Nil(t, response.GetConfiguration())
+}
+
 func newDeploymentTestBuilder(t *testing.T) (*Builder, []*basev0.NetworkMapping) {
 	t.Helper()
 	ctx := context.Background()

@@ -277,7 +277,7 @@ func (s *Service) createOwnerConnectionString(ctx context.Context, conf *basev0.
 		return "", s.Wool.Wrapf(err, "cannot get user and password")
 	}
 
-	return postgresConnectionString(address, s.DatabaseName, s.postgresUser, s.postgresPassword, withSSL), nil
+	return postgresConnectionString(address, s.DatabaseName, s.postgresUser, s.postgresPassword, withSSL, s.externalIdentity()), nil
 }
 
 func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev0.Configuration, instance *basev0.NetworkInstance, withSSL bool) (*basev0.Configuration, error) {
@@ -287,9 +287,10 @@ func (s *Service) CreateConnectionConfiguration(ctx context.Context, conf *basev
 		return nil, s.Wool.Wrapf(err, "cannot load postgres credentials")
 	}
 	readOnlyRole, readWriteRole := runtimeRoleNames(s.DatabaseName)
-	ownerConnection := postgresConnectionString(instance.Address, s.DatabaseName, s.postgresUser, s.postgresPassword, withSSL)
-	readOnlyConnection := postgresConnectionString(instance.Address, s.DatabaseName, readOnlyRole, s.readOnlyPassword, withSSL)
-	readWriteConnection := postgresConnectionString(instance.Address, s.DatabaseName, readWriteRole, s.readWritePassword, withSSL)
+	passwordless := s.externalIdentity()
+	ownerConnection := postgresConnectionString(instance.Address, s.DatabaseName, s.postgresUser, s.postgresPassword, withSSL, passwordless)
+	readOnlyConnection := postgresConnectionString(instance.Address, s.DatabaseName, readOnlyRole, s.readOnlyPassword, withSSL, passwordless)
+	readWriteConnection := postgresConnectionString(instance.Address, s.DatabaseName, readWriteRole, s.readWritePassword, withSSL, passwordless)
 
 	outputConf := &basev0.Configuration{
 		Origin:         s.Unique(),
@@ -326,15 +327,16 @@ func (s *Service) promotableConnectionConfiguration(instance *basev0.NetworkInst
 	}
 }
 
-func postgresConnectionString(address, database, user, password string, withSSL bool) string {
+func postgresConnectionString(address, database, user, password string, withSSL, passwordless bool) string {
 	query := url.Values{}
 	if !withSSL || strings.Contains(address, "localhost") || strings.Contains(address, "host.docker.internal") {
 		query.Set("sslmode", "disable")
 	}
 	// External-identity mode carries no password: the consumer acquires a
 	// short-lived token at connect time, so the DSN keeps only the principal.
+	// The mode is authoritative — a stray password must never leak into the DSN.
 	userinfo := url.User(user)
-	if password != "" {
+	if !passwordless {
 		userinfo = url.UserPassword(user, password)
 	}
 	connection := &url.URL{

@@ -333,6 +333,12 @@ type promotableWorkloadSecretReferences struct {
 func (s *Builder) selectPromotableSecretReferences(
 	configured map[string]*builderv0.KubernetesSecretKeyReference,
 ) (*promotableWorkloadSecretReferences, error) {
+	// The restricted deploy build never loads runtime credentials, so this is
+	// the only place the auth mode is checked on this path: reject a mistyped
+	// mode here rather than silently demanding password Secret references.
+	if err := s.validateAuthMode(); err != nil {
+		return nil, err
+	}
 	// External-identity mode holds no passwords, so the deploy build promotes no
 	// credential Secret references; infra's guard forbids any Secret in the
 	// db-auth stack.

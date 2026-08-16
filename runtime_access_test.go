@@ -97,6 +97,41 @@ func TestExternalIdentityModeAcceptsPasswordlessCredentialsAndDSNs(t *testing.T)
 	assertPasswordlessConnection(t, configurationValue(t, configuration, readWriteConnectionKey), readWriteRole)
 }
 
+func TestExternalIdentityDSNsStayPasswordlessDespiteStrayCredentials(t *testing.T) {
+	svc := newTestPostgresService()
+	svc.DatabaseName = "accounts"
+	svc.AuthMode = authModeExternalIdentity
+
+	// A configuration that still carries a service-managed owner password must
+	// not leak it (or any password derived from it) into the passwordless DSNs.
+	configuration, err := svc.CreateConnectionConfiguration(
+		context.Background(),
+		testPostgresConfiguration("app-principal", "stray-owner-secret", "", ""),
+		&basev0.NetworkInstance{Address: "database.internal:5432", Access: resources.NewNativeNetworkAccess()},
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	readOnlyRole, readWriteRole := runtimeRoleNames(svc.DatabaseName)
+	assertPasswordlessConnection(t, configurationValue(t, configuration, ownerConnectionKey), "app-principal")
+	assertPasswordlessConnection(t, configurationValue(t, configuration, readOnlyConnectionKey), readOnlyRole)
+	assertPasswordlessConnection(t, configurationValue(t, configuration, readWriteConnectionKey), readWriteRole)
+}
+
+func TestExternalIdentityRuntimeAccessFailsClosed(t *testing.T) {
+	runtime := NewRuntime()
+	runtime.DatabaseName = "accounts"
+	runtime.AuthMode = authModeExternalIdentity
+
+	// The self-hosted reconciler would otherwise provision empty-password LOGIN
+	// roles; it must refuse before opening any connection.
+	if err := runtime.ensureRuntimeAccess(context.Background()); err == nil {
+		t.Fatal("self-hosted runtime reconciled runtime access in external-identity mode")
+	}
+}
+
 func TestUnsupportedAuthModeFailsClosed(t *testing.T) {
 	svc := newTestPostgresService()
 	svc.DatabaseName = "accounts"
