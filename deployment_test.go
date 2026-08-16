@@ -405,6 +405,44 @@ func TestPromotableGitOpsDeploymentRejectsMissingOrOptionalRequiredSecretReferen
 	}
 }
 
+func TestPromotableExternalIdentityDeploymentPromotesNoCredentialSecrets(t *testing.T) {
+	builder, networkMappings := newDeploymentTestBuilder(t)
+	builder.AuthMode = authModeExternalIdentity
+	destination := t.TempDir()
+
+	// External-identity mode requires no configured Secret references at all.
+	response, err := builder.Deploy(context.Background(), promotableDeploymentRequest(
+		destination,
+		networkMappings,
+		nil,
+	))
+	require.NoError(t, err)
+	require.Equal(t, builderv0.DeploymentStatus_SUCCESS, response.GetState().GetState(), response.GetState().GetMessage())
+
+	values := response.GetConfiguration().GetInfos()[0].GetConfigurationValues()
+	require.Len(t, values, 2)
+	for _, value := range values {
+		require.Contains(t, []string{readOnlyConnectionKey, readWriteConnectionKey}, value.GetKey())
+		require.True(t, value.GetSecret())
+		require.Empty(t, value.GetValue())
+	}
+
+	statefulSet := readDeploymentFile(t, destination, "base", "stateful-set.yaml")
+	job := readDeploymentFile(t, destination, "base", "job.yaml")
+	for _, manifest := range []string{statefulSet, job} {
+		require.NotContains(t, manifest, "secretKeyRef")
+		for _, credential := range []string{
+			"POSTGRES_PASSWORD",
+			"POSTGRES_READ_ONLY_PASSWORD",
+			"POSTGRES_READ_WRITE_PASSWORD",
+			migrationConnectionEnvironmentKey,
+		} {
+			require.NotContains(t, manifest, "name: "+credential)
+		}
+	}
+	require.Empty(t, strings.TrimSpace(readDeploymentFile(t, destination, "overlays", "test", "secret.yaml")))
+}
+
 func newDeploymentTestBuilder(t *testing.T) (*Builder, []*basev0.NetworkMapping) {
 	t.Helper()
 	ctx := context.Background()

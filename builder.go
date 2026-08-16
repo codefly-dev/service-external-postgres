@@ -333,6 +333,15 @@ type promotableWorkloadSecretReferences struct {
 func (s *Builder) selectPromotableSecretReferences(
 	configured map[string]*builderv0.KubernetesSecretKeyReference,
 ) (*promotableWorkloadSecretReferences, error) {
+	// External-identity mode holds no passwords, so the deploy build promotes no
+	// credential Secret references; infra's guard forbids any Secret in the
+	// db-auth stack.
+	if s.externalIdentity() {
+		return &promotableWorkloadSecretReferences{
+			StatefulSet:  map[string]*builderv0.KubernetesSecretKeyReference{},
+			BootstrapJob: map[string]*builderv0.KubernetesSecretKeyReference{},
+		}, nil
+	}
 	statefulSetEnvironmentVariables := []string{
 		"POSTGRES_USER",
 		"POSTGRES_PASSWORD",

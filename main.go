@@ -35,6 +35,16 @@ type Settings struct {
 	DatabaseName string `yaml:"database-name"`
 	HotReload    bool   `yaml:"hot-reload"`
 
+	// AuthMode selects how runtime login principals authenticate. Empty is the
+	// default password mode: the service owns password-authenticated login
+	// roles and exports credentialed connection strings. "external-identity" is
+	// for managed cloud Postgres with password auth disabled — login principals
+	// are provisioned out-of-band by the cloud identity provider (Entra ID /
+	// Cloud SQL IAM) and consumers acquire a short-lived token at connect time,
+	// so no password is generated, required, or embedded in any connection
+	// string or Kubernetes Secret. See templates/agent/README.md.tmpl.
+	AuthMode string `yaml:"auth-mode"`
+
 	WithoutSSL  bool `yaml:"without-ssl"`  // Default to SSL
 	NoMigration bool `yaml:"no-migration"` // Developer only
 
@@ -321,9 +331,15 @@ func postgresConnectionString(address, database, user, password string, withSSL 
 	if !withSSL || strings.Contains(address, "localhost") || strings.Contains(address, "host.docker.internal") {
 		query.Set("sslmode", "disable")
 	}
+	// External-identity mode carries no password: the consumer acquires a
+	// short-lived token at connect time, so the DSN keeps only the principal.
+	userinfo := url.User(user)
+	if password != "" {
+		userinfo = url.UserPassword(user, password)
+	}
 	connection := &url.URL{
 		Scheme:   "postgresql",
-		User:     url.UserPassword(user, password),
+		User:     userinfo,
 		Host:     address,
 		Path:     "/" + database,
 		RawQuery: query.Encode(),

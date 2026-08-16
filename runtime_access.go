@@ -22,7 +22,19 @@ const (
 	// migrationConnectionEnvironmentKey is an internal bootstrap-job secret.
 	// It is never part of the service's exported Configuration contract.
 	migrationConnectionEnvironmentKey = "CODEFLY_POSTGRES_MIGRATION_CONNECTION"
+
+	// authModePassword and authModeExternalIdentity are the supported values of
+	// Settings.AuthMode. Empty is treated as authModePassword.
+	authModePassword         = "password"
+	authModeExternalIdentity = "external-identity"
 )
+
+// externalIdentity reports whether login principals authenticate through a
+// cloud identity provider instead of service-managed passwords. In this mode no
+// password is generated, required, or embedded in connection strings or Secrets.
+func (s *Service) externalIdentity() bool {
+	return s.AuthMode == authModeExternalIdentity
+}
 
 type runtimeAccess struct {
 	readOnlyRole   string
@@ -54,23 +66,31 @@ func (s *Service) validateCredentials() error {
 	if strings.TrimSpace(s.postgresUser) == "" {
 		return fmt.Errorf("postgres owner user is required")
 	}
-	credentials := []struct {
-		name  string
-		value string
-	}{
-		{name: "POSTGRES_PASSWORD", value: s.postgresPassword},
-		{name: "POSTGRES_READ_ONLY_PASSWORD", value: s.readOnlyPassword},
-		{name: "POSTGRES_READ_WRITE_PASSWORD", value: s.readWritePassword},
-	}
-	for _, credential := range credentials {
-		if strings.TrimSpace(credential.value) == "" {
-			return fmt.Errorf("%s must not be empty", credential.name)
+	switch s.AuthMode {
+	case "", authModePassword:
+		credentials := []struct {
+			name  string
+			value string
+		}{
+			{name: "POSTGRES_PASSWORD", value: s.postgresPassword},
+			{name: "POSTGRES_READ_ONLY_PASSWORD", value: s.readOnlyPassword},
+			{name: "POSTGRES_READ_WRITE_PASSWORD", value: s.readWritePassword},
 		}
-	}
-	if s.postgresPassword == s.readOnlyPassword ||
-		s.postgresPassword == s.readWritePassword ||
-		s.readOnlyPassword == s.readWritePassword {
-		return fmt.Errorf("owner, read-only, and read-write passwords must be distinct")
+		for _, credential := range credentials {
+			if strings.TrimSpace(credential.value) == "" {
+				return fmt.Errorf("%s must not be empty", credential.name)
+			}
+		}
+		if s.postgresPassword == s.readOnlyPassword ||
+			s.postgresPassword == s.readWritePassword ||
+			s.readOnlyPassword == s.readWritePassword {
+			return fmt.Errorf("owner, read-only, and read-write passwords must be distinct")
+		}
+	case authModeExternalIdentity:
+		// Login principals authenticate through the cloud identity provider;
+		// the service holds no passwords to validate.
+	default:
+		return fmt.Errorf("unsupported postgres auth mode %q", s.AuthMode)
 	}
 	_, _, err := s.runtimeAccess()
 	return err
