@@ -22,7 +22,33 @@ const (
 	// migrationConnectionEnvironmentKey is an internal bootstrap-job secret.
 	// It is never part of the service's exported Configuration contract.
 	migrationConnectionEnvironmentKey = "CODEFLY_POSTGRES_MIGRATION_CONNECTION"
+
+	// authModePassword and authModeExternalIdentity are the supported values of
+	// Settings.AuthMode. Empty is treated as authModePassword.
+	authModePassword         = "password"
+	authModeExternalIdentity = "external-identity"
 )
+
+// externalIdentity reports whether login principals authenticate through a
+// cloud identity provider instead of service-managed passwords. In this mode no
+// password is generated, required, or embedded in connection strings or Secrets.
+func (s *Service) externalIdentity() bool {
+	return s.AuthMode == authModeExternalIdentity
+}
+
+// validateAuthMode rejects any Settings.AuthMode outside the supported set.
+// Empty is treated as authModePassword. It is enforced on every path that
+// branches on the mode — including the restricted deploy build, which never
+// loads runtime credentials — so a mistyped mode fails loud instead of silently
+// falling back to password behavior.
+func (s *Service) validateAuthMode() error {
+	switch s.AuthMode {
+	case "", authModePassword, authModeExternalIdentity:
+		return nil
+	default:
+		return fmt.Errorf("unsupported postgres auth mode %q", s.AuthMode)
+	}
+}
 
 type runtimeAccess struct {
 	readOnlyRole   string
@@ -54,23 +80,30 @@ func (s *Service) validateCredentials() error {
 	if strings.TrimSpace(s.postgresUser) == "" {
 		return fmt.Errorf("postgres owner user is required")
 	}
-	credentials := []struct {
-		name  string
-		value string
-	}{
-		{name: "POSTGRES_PASSWORD", value: s.postgresPassword},
-		{name: "POSTGRES_READ_ONLY_PASSWORD", value: s.readOnlyPassword},
-		{name: "POSTGRES_READ_WRITE_PASSWORD", value: s.readWritePassword},
+	if err := s.validateAuthMode(); err != nil {
+		return err
 	}
-	for _, credential := range credentials {
-		if strings.TrimSpace(credential.value) == "" {
-			return fmt.Errorf("%s must not be empty", credential.name)
+	// External-identity login principals authenticate through the cloud identity
+	// provider; the service holds no passwords to validate.
+	if !s.externalIdentity() {
+		credentials := []struct {
+			name  string
+			value string
+		}{
+			{name: "POSTGRES_PASSWORD", value: s.postgresPassword},
+			{name: "POSTGRES_READ_ONLY_PASSWORD", value: s.readOnlyPassword},
+			{name: "POSTGRES_READ_WRITE_PASSWORD", value: s.readWritePassword},
 		}
-	}
-	if s.postgresPassword == s.readOnlyPassword ||
-		s.postgresPassword == s.readWritePassword ||
-		s.readOnlyPassword == s.readWritePassword {
-		return fmt.Errorf("owner, read-only, and read-write passwords must be distinct")
+		for _, credential := range credentials {
+			if strings.TrimSpace(credential.value) == "" {
+				return fmt.Errorf("%s must not be empty", credential.name)
+			}
+		}
+		if s.postgresPassword == s.readOnlyPassword ||
+			s.postgresPassword == s.readWritePassword ||
+			s.readOnlyPassword == s.readWritePassword {
+			return fmt.Errorf("owner, read-only, and read-write passwords must be distinct")
+		}
 	}
 	_, _, err := s.runtimeAccess()
 	return err
@@ -184,6 +217,13 @@ func validSQLIdentifier(value string) bool {
 // only in generic mode; delegated mode grants it only explicit SET ROLE
 // memberships. Neither role has schema CREATE or role-management authority.
 func (s *Runtime) ensureRuntimeAccess(ctx context.Context) error {
+	// The self-hosted runtime provisions password-authenticated LOGIN roles
+	// (ensureLoginRole). External-identity login principals are created
+	// out-of-band by the cloud identity provider, so running this path would
+	// issue empty-password LOGIN roles; fail closed instead.
+	if s.externalIdentity() {
+		return s.Wool.NewError("self-hosted runtime cannot reconcile runtime access in external-identity mode: login principals are provisioned by the cloud identity provider")
+	}
 	schemas, err := normalizedRuntimeSchemas(s.Settings.RuntimeSchemas)
 	if err != nil {
 		return err
