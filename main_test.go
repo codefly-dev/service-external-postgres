@@ -457,6 +457,8 @@ func assertExternalIdentityReconciliation(t *testing.T, ctx context.Context, con
 		_, err = isolate.DB.ExecContext(ctx, "CREATE ROLE "+pq.QuoteIdentifier(principal)+" LOGIN")
 		require.NoError(t, err)
 	}
+	_, err = isolate.DB.ExecContext(ctx, "CREATE TABLE ext_fixture (id integer)")
+	require.NoError(t, err)
 
 	full := base
 	full.ReadOnlyPrincipals = []string{readerPrincipal}
@@ -476,17 +478,58 @@ func assertExternalIdentityReconciliation(t *testing.T, ctx context.Context, con
 	require.ElementsMatch(t, []string{readOnlyGroup}, principalGroupMemberships(t, ctx, isolate.DB, readerPrincipal))
 	require.ElementsMatch(t, []string{readWriteGroup}, principalGroupMemberships(t, ctx, isolate.DB, writerPrincipal))
 
-	// A stray membership on an external principal is revoked, converging on
-	// exactly the group-role membership; re-running is idempotent.
+	// The group membership confers effective privilege by inheritance: the
+	// writer principal can write, the reader principal can read but not write.
+	assertPrincipalInsert := func(principal string, wantOK bool) {
+		conn, err := isolate.DB.Conn(ctx)
+		require.NoError(t, err)
+		defer conn.Close()
+		_, err = conn.ExecContext(ctx, "SET ROLE "+pq.QuoteIdentifier(principal))
+		require.NoError(t, err)
+		_, insertErr := conn.ExecContext(ctx, "INSERT INTO ext_fixture (id) VALUES (1)")
+		_, _ = conn.ExecContext(ctx, "RESET ROLE")
+		if wantOK {
+			require.NoError(t, insertErr, "writer principal must inherit write access via its group role")
+		} else {
+			require.Error(t, insertErr, "reader principal must not inherit write access")
+		}
+	}
+	assertPrincipalInsert(writerPrincipal, true)
+	assertPrincipalInsert(readerPrincipal, false)
+	readerConn, err := isolate.DB.Conn(ctx)
+	require.NoError(t, err)
+	defer readerConn.Close()
+	_, err = readerConn.ExecContext(ctx, "SET ROLE "+pq.QuoteIdentifier(readerPrincipal))
+	require.NoError(t, err)
+	var readable int
+	require.NoError(t, readerConn.QueryRowContext(ctx, "SELECT count(*) FROM ext_fixture").Scan(&readable),
+		"reader principal must inherit read access via its group role")
+	_, _ = readerConn.ExecContext(ctx, "RESET ROLE")
+
+	// A membership the principal holds outside the managed group is not touched:
+	// the reconciler owns the group's membership, not the cloud principal's.
 	strayRole := readWriteGroup + "_stray"
 	_, err = isolate.DB.ExecContext(ctx, "CREATE ROLE "+pq.QuoteIdentifier(strayRole)+" NOLOGIN")
 	require.NoError(t, err)
 	_, err = isolate.DB.ExecContext(ctx, "GRANT "+pq.QuoteIdentifier(strayRole)+" TO "+pq.QuoteIdentifier(writerPrincipal))
 	require.NoError(t, err)
 	require.NoError(t, reconcile(full))
-	require.ElementsMatch(t, []string{readWriteGroup}, principalGroupMemberships(t, ctx, isolate.DB, writerPrincipal))
+	require.ElementsMatch(t, []string{readWriteGroup, strayRole}, principalGroupMemberships(t, ctx, isolate.DB, writerPrincipal))
+
+	// A principal dropped from the configured set is revoked from the group,
+	// idempotently, without disturbing the principals still configured.
+	retiredPrincipal := readWriteGroup + "_retired"
+	_, err = isolate.DB.ExecContext(ctx, "CREATE ROLE "+pq.QuoteIdentifier(retiredPrincipal)+" LOGIN")
+	require.NoError(t, err)
+	withRetired := full
+	withRetired.ReadWritePrincipals = []string{writerPrincipal, retiredPrincipal}
+	require.NoError(t, reconcile(withRetired))
+	require.ElementsMatch(t, []string{readWriteGroup}, principalGroupMemberships(t, ctx, isolate.DB, retiredPrincipal))
 	require.NoError(t, reconcile(full))
-	require.ElementsMatch(t, []string{readWriteGroup}, principalGroupMemberships(t, ctx, isolate.DB, writerPrincipal))
+	require.Empty(t, principalGroupMemberships(t, ctx, isolate.DB, retiredPrincipal))
+	require.NoError(t, reconcile(full))
+	require.Empty(t, principalGroupMemberships(t, ctx, isolate.DB, retiredPrincipal))
+	require.ElementsMatch(t, []string{readWriteGroup, strayRole}, principalGroupMemberships(t, ctx, isolate.DB, writerPrincipal))
 }
 
 func principalGroupMemberships(t *testing.T, ctx context.Context, db *sql.DB, principal string) []string {

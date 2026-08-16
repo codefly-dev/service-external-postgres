@@ -62,6 +62,11 @@ type RuntimeAccess struct {
 // principal receives direct DML only when no delegated roles are configured;
 // otherwise its exclusive write authority is the reconciled NOLOGIN role set.
 // The caller owns the transaction and must roll it back on any returned error.
+//
+// Membership reconciliation revokes then re-grants, so the caller must also
+// serialize concurrent reconciliations of the same database: the service
+// runtime holds a per-database advisory lock for the transaction's duration,
+// and external-identity callers must do the same.
 func ReconcileRuntimeAccess(ctx context.Context, tx *sql.Tx, access RuntimeAccess) error {
 	if ctx == nil {
 		return errors.New("runtime-access context is required")
@@ -207,12 +212,59 @@ func ensureGroupRole(ctx context.Context, tx *sql.Tx, role string) error {
 	return err
 }
 
-// reconcileExternalPrincipals reconciles each externally-created login
-// principal into exactly its group-role membership. The cloud identity provider
-// owns the principals, so this fails loud when one is absent rather than
-// creating it (mirroring the delegated read-write role existence check).
+// reconcileExternalPrincipals makes the group role's members exactly the
+// configured external principals: members no longer configured are revoked, and
+// newly configured principals are granted. It reconciles the group's membership
+// only — a principal's memberships outside this group are the cloud identity
+// provider's concern and are left untouched. The provider owns the principals,
+// so a configured principal that does not exist fails loud rather than being
+// created (mirroring the delegated read-write role existence check).
 func reconcileExternalPrincipals(ctx context.Context, tx *sql.Tx, group string, principals []string) error {
+	desired := make(map[string]struct{}, len(principals))
 	for _, principal := range principals {
+		desired[principal] = struct{}{}
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT member.rolname
+		FROM pg_auth_members membership
+		JOIN pg_roles granted ON granted.oid = membership.roleid
+		JOIN pg_roles member ON member.oid = membership.member
+		WHERE granted.rolname = $1`, group)
+	if err != nil {
+		return err
+	}
+	current := make(map[string]struct{})
+	for rows.Next() {
+		var member string
+		if err := rows.Scan(&member); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		current[member] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	quotedGroup := pq.QuoteIdentifier(group)
+	for member := range current {
+		if _, keep := desired[member]; keep {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `REVOKE `+quotedGroup+` FROM `+pq.QuoteIdentifier(member)); err != nil {
+			return err
+		}
+	}
+
+	for _, principal := range principals {
+		if _, member := current[principal]; member {
+			continue
+		}
 		var exists bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)`, principal).Scan(&exists); err != nil {
 			return err
@@ -220,9 +272,10 @@ func reconcileExternalPrincipals(ctx context.Context, tx *sql.Tx, group string, 
 		if !exists {
 			return fmt.Errorf("external identity principal %q does not exist; create it out-of-band", principal)
 		}
-		if err := reconcileRuntimeRoleMemberships(ctx, tx, principal, []string{group}); err != nil {
+		if _, err := tx.ExecContext(ctx, `GRANT `+quotedGroup+` TO `+pq.QuoteIdentifier(principal)); err != nil {
 			return err
 		}
+		current[principal] = struct{}{}
 	}
 	return nil
 }
