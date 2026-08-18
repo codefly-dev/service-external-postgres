@@ -40,6 +40,10 @@ spec:
           # dir is authoritative.
           image: {{ .Deployment.Parameters.ManagedImage }}
           imagePullPolicy: IfNotPresent
+          args:
+{{- range .Deployment.Parameters.PostgresArguments }}
+            - {{ printf "%q" . }}
+{{- end }}
           # Container-level security. Defense-in-depth on top of the
           # pod-level securityContext above. allowPrivilegeEscalation
           # = false stops setuid binaries from gaining root inside

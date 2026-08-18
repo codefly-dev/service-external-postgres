@@ -18,9 +18,10 @@ import (
 
 func TestDeploymentTemplatesWithMigration(t *testing.T) {
 	dir := agenttesting.AssertKustomizeTemplates(t, deploymentFS, DeploymentTemplateParameters{
-		WithBootstrap:    true,
-		ManagedImage:     image.FullName(),
-		BootstrapJobName: "postgres-aaaaaaaaaaaa",
+		WithBootstrap:     true,
+		ManagedImage:      image.FullName(),
+		PostgresArguments: []string{"postgres", "-c", "max_wal_size=4096MB", "-c", "checkpoint_timeout=900s"},
+		BootstrapJobName:  "postgres-aaaaaaaaaaaa",
 	})
 	assertMigrationResource(t, dir, true)
 	assertEphemeralSecret(t, dir)
@@ -28,8 +29,9 @@ func TestDeploymentTemplatesWithMigration(t *testing.T) {
 
 func TestDeploymentTemplatesWithoutBootstrap(t *testing.T) {
 	dir := agenttesting.AssertKustomizeTemplates(t, deploymentFS, DeploymentTemplateParameters{
-		ManagedImage:     image.FullName(),
-		BootstrapJobName: "postgres-aaaaaaaaaaaa",
+		ManagedImage:      image.FullName(),
+		PostgresArguments: []string{"postgres", "-c", "max_wal_size=4096MB", "-c", "checkpoint_timeout=900s"},
+		BootstrapJobName:  "postgres-aaaaaaaaaaaa",
 	})
 	assertMigrationResource(t, dir, false)
 }
@@ -222,6 +224,8 @@ func TestPromotableGitOpsDeploymentReturnsReferenceOnlyConfigurationAndScopesSec
 	statefulSet := readDeploymentFile(t, destination, "base", "stateful-set.yaml")
 	for _, expected := range []string{
 		image.FullName(),
+		`- "max_wal_size=4096MB"`,
+		`- "checkpoint_timeout=900s"`,
 		"name: PGDATA",
 		"value: /var/lib/postgresql/data/pgdata",
 		"name: POSTGRES_USER",
@@ -271,6 +275,21 @@ func TestPromotableGitOpsDeploymentReturnsReferenceOnlyConfigurationAndScopesSec
 		require.NotContains(t, job, unexpected)
 	}
 	require.Regexp(t, `^postgres-[0-9a-f]{12}$`, bootstrapJobResourceName(t, job))
+}
+
+func TestDeploymentRejectsStorageUnsafeWALBudget(t *testing.T) {
+	builder, networkMappings := newDeploymentTestBuilder(t)
+	builder.WALBudget.MaxSizeMB = 4097
+	destination := t.TempDir()
+
+	response, err := builder.Deploy(context.Background(), promotableDeploymentRequest(
+		destination,
+		networkMappings,
+		promotablePostgresSecretReferences(),
+	))
+	require.NoError(t, err)
+	require.Equal(t, builderv0.DeploymentStatus_ERROR, response.GetState().GetState())
+	require.Contains(t, response.GetState().GetMessage(), "exceeds the storage-safe limit 4096")
 }
 
 func TestPromotableBootstrapJobIdentityChangesWithImageDigest(t *testing.T) {

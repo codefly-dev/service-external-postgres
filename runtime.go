@@ -80,6 +80,11 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	s.Runtime.WithContext(req.GetRuntimeContext())
 
 	w := s.Wool.In("runtime::init")
+	walBudget, err := s.Settings.effectiveWALBudget()
+	if err != nil {
+		return s.Runtime.InitError(err)
+	}
+	reportWALBudget(w, walBudget)
 
 	s.NetworkMappings = req.ProposedNetworkMappings
 
@@ -151,7 +156,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	if rc := req.GetRuntimeContext(); rc != nil && rc.Kind == resources.RuntimeContextNix {
 		w.Debug("using nix runtime for postgres", wool.Field("port", instance.Port))
 		nixpg, errNix := newNixPostgres(ctx, nixPostgresStateKey(s.Location, s.Environment.NamingScope), uint16(instance.Port),
-			s.postgresUser, s.postgresPassword, s.DatabaseName, s.LogLevel, newPGLogWriter(s.Wool))
+			s.postgresUser, s.postgresPassword, s.DatabaseName, s.LogLevel, walBudget, newPGLogWriter(s.Wool))
 		if errNix != nil {
 			return s.Runtime.InitError(errNix)
 		}
@@ -184,22 +189,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		resources.Env("POSTGRES_PASSWORD", s.postgresPassword),
 		resources.Env("POSTGRES_DB", s.DatabaseName))
 
-	// Quieten the server when a log level is configured. The official
-	// postgres image's ENTRYPOINT is docker-entrypoint.sh and its
-	// default CMD is `postgres`. WithCommand only overrides CMD, so
-	// we provide just `postgres <flags>` — the entrypoint still runs
-	// initdb on first boot, then execs our postgres + flags. The
-	// `-c` args are passed straight to the server and override the
-	// equivalent postgresql.conf entries.
-	if lvl := strings.ToLower(strings.TrimSpace(s.LogLevel)); lvl != "" {
-		runner.WithCommand(
-			"postgres",
-			"-c", "log_min_messages="+lvl,
-			"-c", "log_statement=none",
-			"-c", "log_connections=off",
-			"-c", "log_disconnections=off",
-		)
-	}
+	runner.WithCommand(postgresCommand(walBudget, s.LogLevel)...)
 
 	s.runnerEnvironment = runner
 
@@ -214,6 +204,26 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 		return s.Runtime.InitError(err)
 	}
 	return s.Runtime.InitResponse()
+}
+
+func postgresCommand(walBudget postgresWALBudget, logLevel string) []string {
+	args := append([]string{"postgres"}, walBudget.postgresArguments()...)
+	if level := strings.ToLower(strings.TrimSpace(logLevel)); level != "" {
+		args = append(args,
+			"-c", "log_min_messages="+level,
+			"-c", "log_statement=none",
+			"-c", "log_connections=off",
+			"-c", "log_disconnections=off",
+		)
+	}
+	return args
+}
+
+func reportWALBudget(w *wool.Wool, budget postgresWALBudget) {
+	w.Info("effective postgres WAL budget",
+		wool.Field("max_wal_size_mb", budget.maxSizeMB),
+		wool.Field("checkpoint_timeout_seconds", budget.checkpointTimeoutSeconds),
+	)
 }
 
 // migrateOnInit applies schema migrations DURING Init — after the database is

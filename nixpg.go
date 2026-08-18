@@ -52,6 +52,7 @@ type nixPostgres struct {
 	password  string
 	dbName    string
 	logLevel  string
+	walBudget postgresWALBudget
 	out       io.Writer
 	proc      runners.Proc
 	// serverCancel cancels serverCtx — the context the postgres process runs
@@ -80,7 +81,7 @@ type nixPostgres struct {
 // input, so runtime state cannot live below it. The scoped key also prevents
 // independent Codefly flows from sharing credentials or database contents,
 // while an unscoped restart retains the historical per-location cluster.
-func newNixPostgres(ctx context.Context, stateKey string, port uint16, user, password, dbName, logLevel string, out io.Writer) (*nixPostgres, error) {
+func newNixPostgres(ctx context.Context, stateKey string, port uint16, user, password, dbName, logLevel string, walBudget postgresWALBudget, out io.Writer) (*nixPostgres, error) {
 	if strings.TrimSpace(password) == "" {
 		return nil, fmt.Errorf("postgres password is required for the native runtime")
 	}
@@ -125,6 +126,7 @@ func newNixPostgres(ctx context.Context, stateKey string, port uint16, user, pas
 		password:  password,
 		dbName:    dbName,
 		logLevel:  logLevel,
+		walBudget: walBudget,
 		out:       out,
 	}, nil
 }
@@ -303,6 +305,7 @@ func (n *nixPostgres) startServer(ctx context.Context) error {
 		"-k", n.socketDir,
 		"-c", "listen_addresses=127.0.0.1",
 	}
+	args = append(args, n.walBudget.postgresArguments()...)
 	if lvl := strings.ToLower(strings.TrimSpace(n.logLevel)); lvl != "" {
 		args = append(args,
 			"-c", "log_min_messages="+lvl,
