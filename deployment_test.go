@@ -216,8 +216,8 @@ func TestPromotableGitOpsDeploymentReturnsReferenceOnlyConfigurationAndScopesSec
 	require.NotContains(t, baseKustomization, "namespace.yaml")
 	overlayKustomization := readDeploymentFile(t, destination, "overlays", "test", "kustomization.yaml")
 	require.NotContains(t, overlayKustomization, "secret.yaml")
-	require.Empty(t, strings.TrimSpace(readDeploymentFile(t, destination, "base", "namespace.yaml")))
-	require.Empty(t, strings.TrimSpace(readDeploymentFile(t, destination, "overlays", "test", "secret.yaml")))
+	requireNoDeploymentFile(t, destination, "base", "namespace.yaml")
+	requireNoDeploymentFile(t, destination, "overlays", "test", "secret.yaml")
 
 	statefulSet := readDeploymentFile(t, destination, "base", "stateful-set.yaml")
 	for _, expected := range []string{
@@ -440,7 +440,7 @@ func TestPromotableExternalIdentityDeploymentPromotesNoCredentialSecrets(t *test
 			require.NotContains(t, manifest, "name: "+credential)
 		}
 	}
-	require.Empty(t, strings.TrimSpace(readDeploymentFile(t, destination, "overlays", "test", "secret.yaml")))
+	requireNoDeploymentFile(t, destination, "overlays", "test", "secret.yaml")
 }
 
 func TestPromotableDeploymentRejectsUnsupportedAuthMode(t *testing.T) {
@@ -570,4 +570,10 @@ func readDeploymentFile(t *testing.T, directory string, elements ...string) stri
 	content, err := os.ReadFile(filepath.Join(append([]string{directory}, elements...)...))
 	require.NoError(t, err)
 	return string(content)
+}
+
+func requireNoDeploymentFile(t *testing.T, directory string, elements ...string) {
+	t.Helper()
+	_, err := os.Stat(filepath.Join(append([]string{directory}, elements...)...))
+	require.ErrorIs(t, err, os.ErrNotExist)
 }
