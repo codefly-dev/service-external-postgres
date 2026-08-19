@@ -28,9 +28,8 @@ type persistentCacheMounter interface {
 	WithPersistentCacheMount(context.Context, string, string) (string, error)
 }
 
-func mountPersistentPostgresData(ctx context.Context, runner persistentCacheMounter) error {
-	_, err := runner.WithPersistentCacheMount(ctx, postgresDataCacheKey, postgresDataDirectory)
-	return err
+func mountPersistentPostgresData(ctx context.Context, runner persistentCacheMounter) (string, error) {
+	return runner.WithPersistentCacheMount(ctx, postgresDataCacheKey, postgresDataDirectory)
 }
 
 type Runtime struct {
@@ -80,7 +79,7 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	s.Runtime.WithContext(req.GetRuntimeContext())
 
 	w := s.Wool.In("runtime::init")
-	walBudget, err := s.Settings.effectiveWALBudget()
+	walBudget, err := s.effectiveWALBudget()
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
@@ -176,8 +175,16 @@ func (s *Runtime) Init(ctx context.Context, req *runtimev0.InitRequest) (*runtim
 	if err != nil {
 		return s.Runtime.InitError(err)
 	}
-	if err = mountPersistentPostgresData(ctx, runner); err != nil {
+	postgresDataPath, err := mountPersistentPostgresData(ctx, runner)
+	if err != nil {
 		return s.Runtime.InitError(s.Wool.Wrapf(err, "cannot configure persistent postgres data"))
+	}
+	storage, err := resources.InspectStorageFilesystem(postgresDataPath)
+	if err != nil {
+		return s.Runtime.InitError(s.Wool.Wrapf(err, "cannot inspect persistent postgres storage"))
+	}
+	if err = validateWALBudgetStorage(walBudget, storage); err != nil {
+		return s.Runtime.InitError(err)
 	}
 
 	runner.WithOutput(newPGLogWriter(s.Wool))

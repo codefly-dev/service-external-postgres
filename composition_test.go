@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"math"
 	"slices"
 	"strings"
 	"testing"
 
 	runtimev0 "github.com/codefly-dev/core/generated/go/codefly/services/runtime/v0"
+	"github.com/codefly-dev/core/resources"
 	"gopkg.in/yaml.v3"
 )
 
@@ -85,25 +87,25 @@ func TestEffectiveWALBudget(t *testing.T) {
 	})
 
 	t.Run("explicit", func(t *testing.T) {
-		settings := &Settings{WALBudget: WALBudgetSettings{MaxSizeMB: 2048, CheckpointTimeoutSeconds: 600}}
+		settings := &Settings{WALBudget: WALBudgetSettings{MaxSizeMB: 8192, CheckpointTimeoutSeconds: 600}}
 		budget, err := settings.effectiveWALBudget()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if budget.maxSizeMB != 2048 || budget.checkpointTimeoutSeconds != 600 {
+		if budget.maxSizeMB != 8192 || budget.checkpointTimeoutSeconds != 600 {
 			t.Fatalf("explicit budget = %+v", budget)
 		}
 	})
 }
 
-func TestEffectiveWALBudgetRejectsInvalidAndStorageUnsafeValues(t *testing.T) {
+func TestEffectiveWALBudgetRejectsInvalidValues(t *testing.T) {
 	tests := []struct {
 		name     string
 		settings WALBudgetSettings
 		want     string
 	}{
 		{name: "max size below supported minimum", settings: WALBudgetSettings{MaxSizeMB: 79}, want: "must be at least 80"},
-		{name: "max size exceeds managed storage ceiling", settings: WALBudgetSettings{MaxSizeMB: 4097}, want: "exceeds the storage-safe limit 4096"},
+		{name: "max size cannot convert to bytes", settings: WALBudgetSettings{MaxSizeMB: int(math.MaxUint64/bytesPerMiB) + 1}, want: "cannot be represented as bytes"},
 		{name: "checkpoint timeout too short", settings: WALBudgetSettings{CheckpointTimeoutSeconds: 29}, want: "must be between 30 and 86400"},
 		{name: "checkpoint timeout too long", settings: WALBudgetSettings{CheckpointTimeoutSeconds: 86401}, want: "must be between 30 and 86400"},
 	}
@@ -112,6 +114,37 @@ func TestEffectiveWALBudgetRejectsInvalidAndStorageUnsafeValues(t *testing.T) {
 			_, err := (&Settings{WALBudget: test.settings}).effectiveWALBudget()
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error = %v, want containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestValidateWALBudgetStorageUsesLiveCapacityAndAvailability(t *testing.T) {
+	tests := []struct {
+		name      string
+		budgetMB  int
+		totalMB   uint64
+		freeMB    uint64
+		wantError string
+	}{
+		{name: "larger filesystem admits larger budget", budgetMB: 8192, totalMB: 32 * 1024, freeMB: 20 * 1024},
+		{name: "capacity reserve rejects oversized budget", budgetMB: 8192, totalMB: 16 * 1024, freeMB: 12 * 1024, wantError: "exceeds 40% of storage capacity"},
+		{name: "current usage rejects unavailable budget", budgetMB: 4096, totalMB: 32 * 1024, freeMB: 4095, wantError: "exceeds currently available storage 4095MB"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateWALBudgetStorage(
+				postgresWALBudget{maxSizeMB: test.budgetMB},
+				resources.StorageFilesystem{
+					TotalBytes:     test.totalMB * bytesPerMiB,
+					AvailableBytes: test.freeMB * bytesPerMiB,
+				},
+			)
+			if test.wantError == "" && err != nil {
+				t.Fatalf("validate storage: %v", err)
+			}
+			if test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
+				t.Fatalf("error = %v, want containing %q", err, test.wantError)
 			}
 		})
 	}
@@ -151,9 +184,9 @@ func TestWALBudgetEvidenceReportsEffectiveValues(t *testing.T) {
 	}
 }
 
-func TestRuntimeInitRejectsUnsafeWALBudgetBeforeResolvingStartupInputs(t *testing.T) {
+func TestRuntimeInitRejectsInvalidWALBudgetBeforeResolvingStartupInputs(t *testing.T) {
 	runtime := NewRuntime()
-	runtime.WALBudget.MaxSizeMB = 4097
+	runtime.WALBudget.MaxSizeMB = 79
 	response, err := runtime.Init(context.Background(), &runtimev0.InitRequest{})
 	if err != nil {
 		t.Fatal(err)
@@ -161,7 +194,7 @@ func TestRuntimeInitRejectsUnsafeWALBudgetBeforeResolvingStartupInputs(t *testin
 	if response.GetStatus().GetState() != runtimev0.InitStatus_ERROR {
 		t.Fatalf("init status = %s", response.GetStatus().GetState())
 	}
-	if !strings.Contains(response.GetStatus().GetMessage(), "exceeds the storage-safe limit 4096") {
+	if !strings.Contains(response.GetStatus().GetMessage(), "must be at least 80") {
 		t.Fatalf("init message = %q", response.GetStatus().GetMessage())
 	}
 }

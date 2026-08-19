@@ -30,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/codefly-dev/core/resources"
 	runners "github.com/codefly-dev/core/runners/base"
 	"github.com/codefly-dev/core/shared"
 	"github.com/lib/pq"
@@ -173,6 +174,13 @@ func (n *nixPostgres) Init(ctx context.Context) (initErr error) {
 	}()
 	if err := n.env.Init(ctx); err != nil {
 		return fmt.Errorf("materialize nix postgres env: %w", err)
+	}
+	storage, err := resources.InspectStorageFilesystem(n.dataDir)
+	if err != nil {
+		return fmt.Errorf("inspect nix postgres storage: %w", err)
+	}
+	if err := validateWALBudgetStorage(n.walBudget, storage); err != nil {
+		return err
 	}
 	if err := n.resolveBinDir(); err != nil {
 		return err

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 	"strings"
 
@@ -61,9 +62,10 @@ type Settings struct {
 	WALBudget WALBudgetSettings `yaml:"wal-budget"`
 
 	// Image overrides the default postgres image — bring your own extensions.
-	// e.g. "postgis/postgis:17-3.5" for PostGIS, or any image that ships the
-	// .so files the extensions you list below need. Format "name:tag". Empty =
-	// the default pgvector image (see the `image` var).
+	// The image must retain the official PostgreSQL entrypoint contract so the
+	// agent can own the postgres server command and its configuration arguments.
+	// e.g. "postgis/postgis:17-3.5" for PostGIS. Format "name:tag". Empty = the
+	// default pgvector image (see the `image` var).
 	Image string `yaml:"docker-image"`
 
 	// Extensions are CREATE EXTENSION IF NOT EXISTS'd at startup, on top of the
@@ -120,7 +122,8 @@ const (
 	minimumCheckpointTimeoutSeconds = 30
 	maximumCheckpointTimeoutSeconds = 24 * 60 * 60
 	managedPostgresStorageMB        = 10 * 1024
-	maximumStorageSafeWALSizeMB     = 4 * 1024
+	maximumWALStoragePercent        = 40
+	bytesPerMiB                     = 1024 * 1024
 )
 
 func (s *Settings) effectiveWALBudget() (postgresWALBudget, error) {
@@ -137,13 +140,8 @@ func (s *Settings) effectiveWALBudget() (postgresWALBudget, error) {
 	if budget.maxSizeMB < minimumMaxWALSizeMB {
 		return postgresWALBudget{}, fmt.Errorf("wal-budget.max-size-mb must be at least %d", minimumMaxWALSizeMB)
 	}
-	if budget.maxSizeMB > maximumStorageSafeWALSizeMB {
-		return postgresWALBudget{}, fmt.Errorf(
-			"wal-budget.max-size-mb %d exceeds the storage-safe limit %d for the managed %dMB volume",
-			budget.maxSizeMB,
-			maximumStorageSafeWALSizeMB,
-			managedPostgresStorageMB,
-		)
+	if uint64(budget.maxSizeMB) > math.MaxUint64/bytesPerMiB {
+		return postgresWALBudget{}, fmt.Errorf("wal-budget.max-size-mb %d cannot be represented as bytes", budget.maxSizeMB)
 	}
 	if budget.checkpointTimeoutSeconds < minimumCheckpointTimeoutSeconds ||
 		budget.checkpointTimeoutSeconds > maximumCheckpointTimeoutSeconds {
@@ -154,6 +152,38 @@ func (s *Settings) effectiveWALBudget() (postgresWALBudget, error) {
 		)
 	}
 	return budget, nil
+}
+
+func validateWALBudgetStorage(budget postgresWALBudget, storage resources.StorageFilesystem) error {
+	if storage.TotalBytes == 0 {
+		return fmt.Errorf("cannot validate WAL budget against zero storage capacity")
+	}
+	totalMB := storage.TotalBytes / bytesPerMiB
+	availableMB := storage.AvailableBytes / bytesPerMiB
+	storageSafeMB := totalMB * maximumWALStoragePercent / 100
+	requestedMB := uint64(budget.maxSizeMB)
+	if requestedMB > storageSafeMB {
+		return fmt.Errorf(
+			"wal-budget.max-size-mb %d exceeds %d%% of storage capacity (%dMB of %dMB)",
+			budget.maxSizeMB,
+			maximumWALStoragePercent,
+			storageSafeMB,
+			totalMB,
+		)
+	}
+	if requestedMB > availableMB {
+		return fmt.Errorf(
+			"wal-budget.max-size-mb %d exceeds currently available storage %dMB",
+			budget.maxSizeMB,
+			availableMB,
+		)
+	}
+	return nil
+}
+
+func managedPostgresStorage() resources.StorageFilesystem {
+	capacity := uint64(managedPostgresStorageMB) * bytesPerMiB
+	return resources.StorageFilesystem{TotalBytes: capacity, AvailableBytes: capacity}
 }
 
 func (b postgresWALBudget) postgresArguments() []string {
@@ -219,6 +249,9 @@ type DeploymentTemplateParameters struct {
 	WithBootstrap                bool
 	ManagedImage                 string
 	PostgresArguments            []string
+	WALBudgetMaxSizeMB           int
+	WALStoragePercent            int
+	ManagedStorageSizeGiB        int
 	BootstrapJobName             string
 	DatabaseName                 string
 	StatefulSetSecretReferences  map[string]*builderv0.KubernetesSecretKeyReference

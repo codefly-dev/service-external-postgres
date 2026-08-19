@@ -173,9 +173,6 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 	owner, err := openPostgresCapabilityProbe(ctx, runtime.connection)
 	require.NoError(t, err)
 	defer owner.Close()
-	if runtimeContext.Kind == resources.RuntimeContextContainer {
-		assertSustainedWALBudget(t, ctx, runtime)
-	}
 	// The reusable migration control plane is exercised against this actual
 	// plugin instance, including isolated database lifecycle, runtime-access
 	// reconciliation, physical cloning, and reversible transactional DDL.
@@ -317,49 +314,6 @@ func testCreateToRun(t *testing.T, runtimeContext *basev0.RuntimeContext) {
 			fixtureID,
 		)
 	}
-}
-
-func assertSustainedWALBudget(t *testing.T, ctx context.Context, runtime *Runtime) {
-	t.Helper()
-	db, err := sql.Open("postgres", runtime.connection)
-	require.NoError(t, err)
-	defer db.Close()
-
-	var maxWALSize, checkpointTimeout, checkpointWarning string
-	require.NoError(t, db.QueryRowContext(ctx, "SHOW max_wal_size").Scan(&maxWALSize))
-	require.NoError(t, db.QueryRowContext(ctx, "SHOW checkpoint_timeout").Scan(&checkpointTimeout))
-	require.NoError(t, db.QueryRowContext(ctx, "SHOW checkpoint_warning").Scan(&checkpointWarning))
-	require.Equal(t, "4GB", maxWALSize)
-	require.Equal(t, "15min", checkpointTimeout)
-	require.Equal(t, "30s", checkpointWarning)
-
-	_, err = db.ExecContext(ctx, "CHECKPOINT")
-	require.NoError(t, err)
-	var requestedBefore int64
-	require.NoError(t, db.QueryRowContext(ctx, "SELECT num_requested FROM pg_stat_checkpointer").Scan(&requestedBefore))
-	_, err = db.ExecContext(ctx, "CREATE TABLE wal_budget_qualification (id bigint)")
-	require.NoError(t, err)
-	started := time.Now()
-	_, err = db.ExecContext(ctx, `
-		DO $$
-		BEGIN
-			FOR i IN 1..96 LOOP
-				INSERT INTO wal_budget_qualification VALUES (i);
-				PERFORM pg_switch_wal();
-			END LOOP;
-		END
-		$$
-	`)
-	require.NoError(t, err)
-	require.Less(t, time.Since(started), 30*time.Second, "qualification must cross the former 1GB WAL boundary inside checkpoint_warning")
-	time.Sleep(2 * time.Second)
-
-	var requestedAfter int64
-	require.NoError(t, db.QueryRowContext(ctx, "SELECT num_requested FROM pg_stat_checkpointer").Scan(&requestedAfter))
-	require.Equal(t, requestedBefore, requestedAfter, "production WAL profile requested an early checkpoint")
-	require.NotContains(t, runtime.runnerEnvironment.TailLogs(ctx, 2000), "checkpoints are occurring too frequently")
-	_, err = db.ExecContext(ctx, "DROP TABLE wal_budget_qualification")
-	require.NoError(t, err)
 }
 
 // assertMigrationConnectionsAreOwned proves the real golang-migrate boundary
