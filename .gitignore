@@ -10,3 +10,5 @@ dist/
 
 # Compiled agent binary — never track binaries.
 /service-postgres
+# Built agent binary (rebuilt by `codefly agent build`).
+service-postgres
