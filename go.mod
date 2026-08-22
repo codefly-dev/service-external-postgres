@@ -1,8 +1,6 @@
 module github.com/codefly-dev/service-postgres
 
-go 1.26
-
-toolchain go1.26.6
+go 1.27.0
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.0
