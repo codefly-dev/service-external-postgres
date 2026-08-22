@@ -102,3 +102,53 @@ func TestBuildRecipeOmitsMigrationsWhenDisabled(t *testing.T) {
 	require.NotNil(t, response.GetResult().GetDockerBuildPlan())
 	require.NoError(t, services.VerifyDockerBuildPlan(outputDirectory, response.GetResult().GetDockerBuildPlan()))
 }
+
+// TestBuildRecipePurgesPreexistingOutputDirectory covers a caller that reuses or
+// pre-populates the output directory: stale and foreign content must not survive
+// into the emitted tree, the plan inventory, or (via COPY .) the image.
+func TestBuildRecipePurgesPreexistingOutputDirectory(t *testing.T) {
+	ctx := context.Background()
+	builder := newBuildTestBuilder(t)
+	outputDirectory := t.TempDir()
+
+	require.NoError(t, os.MkdirAll(filepath.Join(outputDirectory, "migrations"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(outputDirectory, "migrations", "9_stale.up.sql"),
+		[]byte("SELECT 'stale';\n"), 0o644))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(outputDirectory, "stale-root.txt"),
+		[]byte("foreign\n"), 0o644))
+
+	response, err := builder.Build(ctx, buildRequest(outputDirectory))
+	require.NoError(t, err)
+	require.Equal(t, builderv0.BuildStatus_SUCCESS, response.GetState().GetState(), response.GetState().GetMessage())
+
+	require.NoFileExists(t, filepath.Join(outputDirectory, "stale-root.txt"))
+	require.NoFileExists(t, filepath.Join(outputDirectory, "migrations", "9_stale.up.sql"))
+	require.FileExists(t, filepath.Join(outputDirectory, "migrations", "1_create_table.up.sql"))
+
+	plan := response.GetResult().GetDockerBuildPlan()
+	require.NotNil(t, plan)
+	for _, file := range plan.GetFiles() {
+		require.NotContains(t, file.GetPath(), "stale", "stale content leaked into the plan inventory")
+	}
+	require.NoError(t, services.VerifyDockerBuildPlan(outputDirectory, plan))
+}
+
+// TestBuildRecipeCreatesEmptyMigrationsDirectory covers migrations enabled with
+// none authored yet: the recipe must still carry a migrations directory so the
+// Dockerfile's COPY migrations resolves, matching the legacy in-agent build.
+func TestBuildRecipeCreatesEmptyMigrationsDirectory(t *testing.T) {
+	ctx := context.Background()
+	builder := newBuildTestBuilder(t)
+	require.NoError(t, os.RemoveAll(builder.Local("migrations")))
+	require.NoError(t, os.MkdirAll(builder.Local("migrations"), 0o755))
+	outputDirectory := t.TempDir()
+
+	response, err := builder.Build(ctx, buildRequest(outputDirectory))
+	require.NoError(t, err)
+	require.Equal(t, builderv0.BuildStatus_SUCCESS, response.GetState().GetState(), response.GetState().GetMessage())
+
+	require.DirExists(t, filepath.Join(outputDirectory, "migrations"))
+	require.NoError(t, services.VerifyDockerBuildPlan(outputDirectory, response.GetResult().GetDockerBuildPlan()))
+}
