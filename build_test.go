@@ -82,15 +82,40 @@ func TestBuildEmitsRecipeToOutputDirectory(t *testing.T) {
 	require.FileExists(t, filepath.Join(outputDirectory, "migrations", "1_create_table.up.sql"))
 	require.FileExists(t, filepath.Join(outputDirectory, "migrations", "1_create_table.down.sql"))
 
-	// runtime-access.sql the Dockerfile COPYs must sit at the context root beside
-	// migrations/, not inside the builder/ recipe-metadata directory the CLI drops
-	// from the staged build context — otherwise the COPY fails to resolve.
+	// The CLI resolves the recipe's "." context to the service directory, so the
+	// runtime-access.sql the Dockerfile COPYs root-relative must sit at the service
+	// directory root beside the committed migrations/ — otherwise the COPY the CLI
+	// runs against that context fails to resolve.
+	require.FileExists(t, filepath.Join(builder.Location, "runtime-access.sql"))
+
+	// It is also rendered into the recipe tree (never under builder/) so the emitted
+	// artifact stays a self-contained context a consumer can build directly.
 	require.FileExists(t, filepath.Join(outputDirectory, "runtime-access.sql"))
 	require.NoFileExists(t, filepath.Join(outputDirectory, "builder", "runtime-access.sql"))
 
 	// The plan the agent emits verifies against the tree it wrote, so the CLI
 	// builds it without the recipe drifting from the inventory.
 	require.NoError(t, services.VerifyDockerBuildPlan(outputDirectory, plan))
+}
+
+// TestFactoryScaffoldsGitignoreForGeneratedRuntimeAccess covers the file the
+// build writes into the service directory on every run: Create must scaffold a
+// .gitignore that keeps the generated runtime-access.sql out of version control,
+// so a consumer's `codefly build service` does not leave untracked noise beside
+// the committed migrations/. This also guards the `all:` embed — a plain
+// //go:embed drops the .gitignore dotfile and the render would silently produce
+// nothing.
+func TestFactoryScaffoldsGitignoreForGeneratedRuntimeAccess(t *testing.T) {
+	ctx := context.Background()
+	builder := newBuildTestBuilder(t)
+
+	require.NoError(t, builder.Templates(ctx,
+		create{DatabaseName: "test", TableName: "postgres"},
+		services.WithFactory(factoryFS)))
+
+	data, err := os.ReadFile(filepath.Join(builder.Location, ".gitignore"))
+	require.NoError(t, err, "Create must scaffold a .gitignore at the service root")
+	require.Contains(t, string(data), "/runtime-access.sql")
 }
 
 func TestBuildRecipeOmitsMigrationsWhenDisabled(t *testing.T) {

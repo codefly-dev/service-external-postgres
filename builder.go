@@ -189,12 +189,14 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 	return s.Builder.BuildResponse()
 }
 
-// buildRecipe renders the bootstrap image's Dockerfile and build context into the
-// caller-owned output directory and returns a reproducible build plan instead of
-// running docker itself. The CLI builds the emitted recipe multi-arch and pushes
-// a manifest list, so a consumer can rebuild the image without the agent
-// toolchain. The context is the recipe tree itself: the rendered builder/ files
-// plus the migrations the image applies at bootstrap.
+// buildRecipe renders the bootstrap image's Dockerfile into the caller-owned
+// output directory and returns a reproducible build plan instead of running
+// docker itself. The CLI builds the emitted recipe multi-arch and pushes a
+// manifest list, so a consumer can rebuild the image without the agent toolchain.
+// The CLI resolves the recipe's "." context to the service directory (s.Location),
+// not the recipe tree, so the files the Dockerfile COPYs must be staged there:
+// migrations/ is already committed and runtime-access.sql is rendered in below.
+// They are mirrored into the recipe tree so it also builds standalone.
 func (s *Builder) buildRecipe(ctx context.Context, outputDirectory string, img *resources.DockerImage, docker DockerTemplating) (*builderv0.BuildResponse, error) {
 	// The plan inventories the whole output directory and the recipe context is
 	// its root, so any pre-existing content the caller left here would be
@@ -208,9 +210,15 @@ func (s *Builder) buildRecipe(ctx context.Context, outputDirectory string, img *
 		return s.Builder.BuildError(err)
 	}
 
-	// runtime-access.sql is a build-context file the Dockerfile COPYs, so it lives
-	// at the context root beside migrations/ — not inside builder/, which the CLI
-	// treats as recipe metadata and drops from the staged build context.
+	// The Dockerfile COPYs runtime-access.sql from the build context root. The CLI
+	// resolves the recipe's "." context to the service directory (s.Location) — not
+	// to the recipe tree — so render it there, beside the already-committed
+	// migrations/, for the build the CLI runs to resolve the COPY. Also render it
+	// into the recipe tree so the emitted artifact stays a self-contained context a
+	// consumer can build directly, mirroring how migrations/ lives in both places.
+	if err := s.renderRuntimeAccess(ctx, docker, s.Location); err != nil {
+		return s.Builder.BuildError(err)
+	}
 	if err := s.renderRuntimeAccess(ctx, docker, outputDirectory); err != nil {
 		return s.Builder.BuildError(err)
 	}
@@ -541,7 +549,9 @@ func (s *Builder) Communicate(stream builderv0.Builder_CommunicateServer) error 
 	return err
 }
 
-//go:embed templates/factory
+// all: so the scaffolded .gitignore (a dotfile go:embed skips by default) is
+// carried into the factory tree and rendered into new services.
+//go:embed all:templates/factory
 var factoryFS embed.FS
 
 //go:embed templates/builder
