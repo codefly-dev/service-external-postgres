@@ -61,7 +61,7 @@ func TestBootstrapImageAlwaysReconcilesRuntimeAccess(t *testing.T) {
 				t.Fatalf("migration command present = %t, want %t", hasMigration, test.withMigrations)
 			}
 
-			accessSQL := renderBuilderTemplate(t, "templates/builder/runtime-access.sql.tmpl", parameters)
+			accessSQL := renderRuntimeAccessTemplate(t, parameters)
 			for _, required := range []string{
 				"NOBYPASSRLS",
 				"NOCREATEROLE",
@@ -100,11 +100,7 @@ func TestBootstrapImageBuildsWhenDockerOmitsTargetArchitecture(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	builderDir := filepath.Join(root, "builder")
-	if err := os.MkdirAll(builderDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(builderDir, "runtime-access.sql"), []byte("SELECT 1;\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "runtime-access.sql"), []byte("SELECT 1;\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	tag := fmt.Sprintf("service-postgres-bootstrap-targetarch-test:%d", time.Now().UnixNano())
@@ -126,7 +122,7 @@ func TestRuntimeAccessTemplateUsesDelegatedRolesAsExclusiveWriteAuthority(t *tes
 		ReadWriteRoles:               []string{"app_tenant", "app_worker"},
 	}
 
-	accessSQL := renderBuilderTemplate(t, "templates/builder/runtime-access.sql.tmpl", parameters)
+	accessSQL := renderRuntimeAccessTemplate(t, parameters)
 	for _, forbidden := range []string{
 		"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES",
 		"GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES",
@@ -158,7 +154,7 @@ func TestRuntimeAccessTemplatePreservesDirectWriterWithoutDelegatedRoles(t *test
 		Schemas:                      []string{"public"},
 	}
 
-	accessSQL := renderBuilderTemplate(t, "templates/builder/runtime-access.sql.tmpl", parameters)
+	accessSQL := renderRuntimeAccessTemplate(t, parameters)
 	for _, required := range []string{
 		"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES",
 		"GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES",
@@ -172,8 +168,16 @@ func TestRuntimeAccessTemplatePreservesDirectWriterWithoutDelegatedRoles(t *test
 }
 
 func renderBuilderTemplate(t *testing.T, name string, parameters DockerTemplating) string {
+	return renderTemplate(t, builderFS, name, parameters)
+}
+
+func renderRuntimeAccessTemplate(t *testing.T, parameters DockerTemplating) string {
+	return renderTemplate(t, runtimeFS, "templates/runtime/runtime-access.sql.tmpl", parameters)
+}
+
+func renderTemplate(t *testing.T, fsys fs.FS, name string, parameters DockerTemplating) string {
 	t.Helper()
-	source, err := fs.ReadFile(builderFS, name)
+	source, err := fs.ReadFile(fsys, name)
 	if err != nil {
 		t.Fatal(err)
 	}

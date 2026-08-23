@@ -166,6 +166,10 @@ func (s *Builder) Build(ctx context.Context, req *builderv0.BuildRequest) (*buil
 		return s.Builder.BuildError(err)
 	}
 
+	if err = s.renderRuntimeAccess(ctx, docker, s.Location); err != nil {
+		return s.Builder.BuildError(err)
+	}
+
 	builder, err := dockerhelpers.NewBuilder(dockerhelpers.BuilderConfiguration{
 		Root:        s.Location,
 		Dockerfile:  "builder/Dockerfile",
@@ -204,6 +208,13 @@ func (s *Builder) buildRecipe(ctx context.Context, outputDirectory string, img *
 		return s.Builder.BuildError(err)
 	}
 
+	// runtime-access.sql is a build-context file the Dockerfile COPYs, so it lives
+	// at the context root beside migrations/ — not inside builder/, which the CLI
+	// treats as recipe metadata and drops from the staged build context.
+	if err := s.renderRuntimeAccess(ctx, docker, outputDirectory); err != nil {
+		return s.Builder.BuildError(err)
+	}
+
 	if s.WithMigration() {
 		// The Dockerfile's COPY migrations needs the directory to exist even when
 		// no migrations are authored yet, so create it before copying rather than
@@ -230,6 +241,13 @@ func (s *Builder) buildRecipe(ctx context.Context, outputDirectory string, img *
 
 	s.Builder.WithBuildPlan(plan)
 	return s.Builder.BuildResponse()
+}
+
+// renderRuntimeAccess renders runtime-access.sql into the build context root, the
+// directory docker builds from. The Dockerfile COPYs it from there, so it must
+// sit beside migrations/ rather than under builder/.
+func (s *Builder) renderRuntimeAccess(ctx context.Context, docker DockerTemplating, contextRoot string) error {
+	return s.Templates(ctx, docker, services.WithTemplate(runtimeFS, "runtime", "").WithDestination("%s", contextRoot))
 }
 
 // copyTree copies every regular file under from into to, preserving the relative
@@ -528,6 +546,9 @@ var factoryFS embed.FS
 
 //go:embed templates/builder
 var builderFS embed.FS
+
+//go:embed templates/runtime
+var runtimeFS embed.FS
 
 //go:embed templates/deployment
 var deploymentFS embed.FS
