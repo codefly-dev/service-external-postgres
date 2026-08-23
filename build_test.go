@@ -79,9 +79,14 @@ func TestBuildEmitsRecipeToOutputDirectory(t *testing.T) {
 	// The rendered tree is a self-contained context: a consumer with no codefly
 	// toolchain can build it from the emitted files alone.
 	require.FileExists(t, filepath.Join(outputDirectory, "builder", "Dockerfile"))
-	require.FileExists(t, filepath.Join(outputDirectory, "builder", "runtime-access.sql"))
 	require.FileExists(t, filepath.Join(outputDirectory, "migrations", "1_create_table.up.sql"))
 	require.FileExists(t, filepath.Join(outputDirectory, "migrations", "1_create_table.down.sql"))
+
+	// runtime-access.sql the Dockerfile COPYs must sit at the context root beside
+	// migrations/, not inside the builder/ recipe-metadata directory the CLI drops
+	// from the staged build context — otherwise the COPY fails to resolve.
+	require.FileExists(t, filepath.Join(outputDirectory, "runtime-access.sql"))
+	require.NoFileExists(t, filepath.Join(outputDirectory, "builder", "runtime-access.sql"))
 
 	// The plan the agent emits verifies against the tree it wrote, so the CLI
 	// builds it without the recipe drifting from the inventory.

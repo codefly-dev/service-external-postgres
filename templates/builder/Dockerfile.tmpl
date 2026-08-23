@@ -20,7 +20,7 @@ COPY . .
 {{- if .WithMigration }}
 COPY migrations /app/migrations
 {{- end }}
-COPY builder/runtime-access.sql /app/runtime-access.sql
+COPY runtime-access.sql /app/runtime-access.sql
 
 CMD set -eu; \
     until pg_isready -d "${{.MigrationConnectionKeyHolder}}" >/dev/null 2>&1; do sleep 2; done; \
