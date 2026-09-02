@@ -23,7 +23,10 @@ RUN mkdir /tmp/pgvector /tmp/pgvector-install && \
 FROM ${POSTGRES_IMAGE} AS runtime
 
 RUN rm /usr/local/bin/gosu
-RUN apk add --no-cache su-exec=0.3-r0 && \
+RUN apk add --no-cache --upgrade \
+    libcrypto3=3.5.8-r0 \
+    libssl3=3.5.8-r0 \
+    su-exec=0.3-r0 && \
     ln -s /sbin/su-exec /usr/local/bin/gosu && \
     rm /var/log/apk.log
 COPY --from=pgvector-builder /tmp/pgvector-install/ /
